@@ -1,10 +1,8 @@
 import { drizzle as drizzlePg, NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import * as postgresSchema from './schema/postgres.js';
-import * as sqliteSchema from './schema/sqlite.js';
 
 export * from './schema/postgres.js';
-export * from './schema/sqlite.js';
 export { eq, and, or, sql } from 'drizzle-orm';
 
 // Postgres initialization for API (Auth, Workspaces & Teams)
