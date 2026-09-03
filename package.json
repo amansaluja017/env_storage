@@ -1,0 +1,18 @@
+{
+  "name": "tubo-monorepo",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "dev:api": "turbo run dev --filter=api",
+    "dev:mobile": "turbo run start --filter=mobile",
+    "build:db": "turbo run build --filter=@tubo/db",
+    "db:seed": "turbo run seed --filter=api",
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "turbo": "^2.10.12",
+    "typescript": "^5.3.3"
+  }
+}

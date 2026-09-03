@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build & runtime artifacts
+dist/
+build/
+.expo/
+.next/
+
+# Databases & local data
+*.db
+*.db-journal
+data/
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# System & logs
+.DS_Store
+*.log
+
+# Turbo
+.turbo/

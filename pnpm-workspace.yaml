@@ -1,0 +1,9 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+overrides:
+  ob1: "0.83.8"
+
