@@ -5,7 +5,10 @@ onlyBuiltDependencies:
   - esbuild
 ignoredBuiltDependencies:
   - better-sqlite3
+neverBuiltDependencies:
+  - better-sqlite3
 overrides:
   ob1: "0.83.8"
 allowBuilds:
   esbuild: true
+  better-sqlite3: false
