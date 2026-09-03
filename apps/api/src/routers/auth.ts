@@ -3,8 +3,7 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { router, publicProcedure, protectedProcedure } from '../trpc.js';
 import { JWT_SECRET, memoryUsers } from '../context.js';
-import { pgDb, users } from '@tubo/db';
-import { eq } from 'drizzle-orm';
+import { pgDb, users, eq } from '@tubo/db';
 import { TRPCError } from '@trpc/server';
 
 export const authRouter = router({

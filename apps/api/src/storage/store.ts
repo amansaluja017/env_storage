@@ -1,5 +1,4 @@
-import { pgDb, users, workspaces, workspaceMembers, teams, teamMembers, teamInvites } from '@tubo/db';
-import { eq, and } from 'drizzle-orm';
+import { pgDb, users, workspaces, workspaceMembers, teams, teamMembers, teamInvites, eq, and } from '@tubo/db';
 import { memoryUsers } from '../context.js';
 
 export interface WorkspaceItem {
@@ -131,7 +130,7 @@ export const dataStore = {
   async getWorkspacesForUser(userId: string): Promise<WorkspaceItem[]> {
     try {
       const res = await pgDb.select().from(workspaces).where(eq(workspaces.ownerId, userId));
-      if (res.length > 0) return res.map(r => ({ ...r, createdAt: r.createdAt }));
+      if (res.length > 0) return res.map((r: any) => ({ ...r, createdAt: r.createdAt }));
     } catch (e) {
       // Fallback
     }
@@ -168,7 +167,7 @@ export const dataStore = {
   async getTeamsForWorkspace(workspaceId: string): Promise<TeamItem[]> {
     try {
       const res = await pgDb.select().from(teams).where(eq(teams.workspaceId, workspaceId));
-      if (res.length > 0) return res.map(r => ({ ...r, createdAt: r.createdAt, description: r.description ?? undefined }));
+      if (res.length > 0) return res.map((r: any) => ({ ...r, createdAt: r.createdAt, description: r.description ?? undefined }));
     } catch (e) {
       // Fallback
     }
@@ -208,7 +207,7 @@ export const dataStore = {
   async getTeamMembers(teamId: string): Promise<TeamMemberItem[]> {
     try {
       const res = await pgDb.select().from(teamMembers).where(eq(teamMembers.teamId, teamId));
-      if (res.length > 0) return res.map(r => ({ ...r, role: r.role, joinedAt: r.joinedAt }));
+      if (res.length > 0) return res.map((r: any) => ({ ...r, role: r.role, joinedAt: r.joinedAt }));
     } catch (e) {
       // Fallback
     }
@@ -241,7 +240,7 @@ export const dataStore = {
   async getInvitesForTeam(teamId: string): Promise<TeamInviteItem[]> {
     try {
       const res = await pgDb.select().from(teamInvites).where(eq(teamInvites.teamId, teamId));
-      if (res.length > 0) return res.map(r => ({ ...r, role: r.role, status: r.status, createdAt: r.createdAt }));
+      if (res.length > 0) return res.map((r: any) => ({ ...r, role: r.role, status: r.status, createdAt: r.createdAt }));
     } catch (e) {
       // Fallback
     }
