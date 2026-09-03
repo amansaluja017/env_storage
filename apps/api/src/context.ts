@@ -1,7 +1,7 @@
 import { inferAsyncReturnType } from '@trpc/server';
 import { CreateExpressContextOptions } from '@trpc/server/adapters/express';
 import jwt from 'jsonwebtoken';
-import { sqliteDb } from '@tubo/db';
+import { pgDb } from '@tubo/db';
 
 export const JWT_SECRET = process.env.JWT_SECRET || 'tubo_secret_key_2026_safe';
 
@@ -40,7 +40,7 @@ export async function createContext({ req, res }: CreateExpressContextOptions) {
     req,
     res,
     user,
-    sqliteDb,
+    pgDb,
   };
 }
 

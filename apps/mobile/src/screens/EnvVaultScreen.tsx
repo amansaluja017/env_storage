@@ -12,17 +12,14 @@ import {
   Platform,
 } from 'react-native';
 import { COLORS } from '../theme';
-
-interface EnvItem {
-  id: string;
-  key: string;
-  value: string;
-  environment: 'development' | 'staging' | 'production';
-  isSecret: boolean;
-  comment?: string;
-  createdBy: string;
-  updatedAt: string;
-}
+import {
+  initMobileSqlite,
+  getMobileEnvs,
+  upsertMobileEnv,
+  deleteMobileEnv,
+  bulkImportMobileEnvs,
+  EnvItem,
+} from '../storage/mobileSqlite';
 
 interface EnvVaultScreenProps {
   token: string;
@@ -51,24 +48,18 @@ export function EnvVaultScreen({ token, workspaceId, teamId, apiBaseUrl }: EnvVa
   const [rawModalVisible, setRawModalVisible] = useState(false);
   const [rawDotEnv, setRawDotEnv] = useState('');
 
+  useEffect(() => {
+    initMobileSqlite();
+  }, []);
+
   const fetchEnvs = async () => {
     if (!workspaceId || !teamId) return;
     setLoading(true);
     try {
-      const url = `${apiBaseUrl}/trpc/env.list?input=${encodeURIComponent(
-        JSON.stringify({ workspaceId, teamId, environment })
-      )}`;
-      const res = await fetch(url, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-      const data = await res.json();
-      if (data.result?.data) {
-        setEnvsList(data.result.data);
-      }
+      const items = await getMobileEnvs(workspaceId, teamId, environment);
+      setEnvsList(items);
     } catch (e) {
-      console.log('Error fetching envs:', e);
+      console.log('Error reading Mobile SQLite envs:', e);
     } finally {
       setLoading(false);
     }
@@ -76,7 +67,7 @@ export function EnvVaultScreen({ token, workspaceId, teamId, apiBaseUrl }: EnvVa
 
   useEffect(() => {
     fetchEnvs();
-  }, [workspaceId, teamId, environment, token]);
+  }, [workspaceId, teamId, environment]);
 
   const handleSaveEnv = async () => {
     if (!keyInput.trim()) {
@@ -85,32 +76,22 @@ export function EnvVaultScreen({ token, workspaceId, teamId, apiBaseUrl }: EnvVa
     }
     setSubmitting(true);
     try {
-      const res = await fetch(`${apiBaseUrl}/trpc/env.upsert`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          id: editingId || undefined,
-          workspaceId,
-          teamId,
-          environment,
-          key: keyInput.toUpperCase().trim(),
-          value: valueInput,
-          isSecret: isSecretInput,
-          comment: commentInput,
-        }),
+      await upsertMobileEnv({
+        id: editingId || undefined,
+        workspaceId,
+        teamId,
+        environment,
+        key: keyInput.toUpperCase().trim(),
+        value: valueInput,
+        isSecret: isSecretInput,
+        comment: commentInput,
+        createdBy: 'Mobile User',
       });
-      const data = await res.json();
-      if (data.error) {
-        throw new Error(data.error.message);
-      }
       setModalVisible(false);
       resetForm();
       fetchEnvs();
     } catch (e: any) {
-      Alert.alert('Save Failed', e.message || 'Unable to save environment variable');
+      Alert.alert('Save Failed', e.message || 'Unable to save environment variable to Mobile SQLite');
     } finally {
       setSubmitting(false);
     }
@@ -127,14 +108,7 @@ export function EnvVaultScreen({ token, workspaceId, teamId, apiBaseUrl }: EnvVa
           style: 'destructive',
           onPress: async () => {
             try {
-              await fetch(`${apiBaseUrl}/trpc/env.delete`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({ id }),
-              });
+              await deleteMobileEnv(id);
               fetchEnvs();
             } catch (e) {
               console.log('Delete error:', e);
@@ -149,26 +123,17 @@ export function EnvVaultScreen({ token, workspaceId, teamId, apiBaseUrl }: EnvVa
     if (!rawDotEnv.trim()) return;
     setSubmitting(true);
     try {
-      const res = await fetch(`${apiBaseUrl}/trpc/env.bulkImport`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          workspaceId,
-          teamId,
-          environment,
-          rawDotEnvContent: rawDotEnv,
-        }),
-      });
-      const data = await res.json();
-      if (data.result?.data) {
-        Alert.alert('Success', `Imported ${data.result.data.importedCount} variables to SQLite!`);
-        setRawModalVisible(false);
-        setRawDotEnv('');
-        fetchEnvs();
-      }
+      const result = await bulkImportMobileEnvs(
+        workspaceId,
+        teamId,
+        environment,
+        rawDotEnv,
+        'Mobile User'
+      );
+      Alert.alert('Success', `Imported ${result.importedCount} variables to Mobile SQLite!`);
+      setRawModalVisible(false);
+      setRawDotEnv('');
+      fetchEnvs();
     } catch (e: any) {
       Alert.alert('Import Failed', e.message);
     } finally {
