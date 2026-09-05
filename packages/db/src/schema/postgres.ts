@@ -52,3 +52,14 @@ export const teamInvites = pgTable('team_invites', {
   invitedBy: text('invited_by').notNull().references(() => users.id, { onDelete: 'cascade' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+export const tokens = pgTable('tokens', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id, { onDelete: 'cascade' }),
+  token: text('token').notNull().unique(),
+  type: varchar('type', { length: 50 }).$type<'refreshToken' | 'verificationToken' | 'passwordResetToken' | 'teamInviteToken' | 'refresh' | 'verification' | 'password_reset' | 'team_invite'>().notNull(),
+  expiresAt: timestamp('expires_at').notNull(),
+  consumedAt: timestamp('consumed_at'),
+  metadata: text('metadata'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});

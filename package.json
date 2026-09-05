@@ -9,6 +9,7 @@
     "dev:mobile": "turbo run start --filter=mobile",
     "build:db": "turbo run build --filter=@tubo/db",
     "db:seed": "turbo run seed --filter=api",
+    "mobile:db:view": "pnpm --filter mobile db:view",
     "test": "turbo run test"
   },
   "devDependencies": {

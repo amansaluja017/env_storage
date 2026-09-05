@@ -1,12 +1,13 @@
 import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc.js';
 import { dataStore } from '../storage/store.js';
+import { TRPCError } from '@trpc/server';
 
 export const teamRouter = router({
   list: protectedProcedure
     .input(z.object({ workspaceId: z.string() }))
-    .query(async ({ input }) => {
-      const teams = await dataStore.getTeamsForWorkspace(input.workspaceId);
+    .query(async ({ ctx, input }) => {
+      const teams = await dataStore.getTeamsForUser(input.workspaceId, ctx.user.id);
       return teams;
     }),
 
@@ -30,7 +31,14 @@ export const teamRouter = router({
 
   getMembers: protectedProcedure
     .input(z.object({ teamId: z.string() }))
-    .query(async ({ input }) => {
+    .query(async ({ ctx, input }) => {
+      const isMember = await dataStore.isUserInTeam(input.teamId, ctx.user.id);
+      if (!isMember) {
+        throw new TRPCError({
+          code: 'FORBIDDEN',
+          message: 'Access Denied: You are not a member of this team.',
+        });
+      }
       const members = await dataStore.getTeamMembers(input.teamId);
       return members;
     }),
