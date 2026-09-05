@@ -10,7 +10,9 @@ import {
   Modal,
   Alert,
 } from 'react-native';
+import { useForm, Controller } from 'react-hook-form';
 import { COLORS } from '../theme';
+import { apiClient } from '../utils/apiClient';
 
 interface TeamMember {
   id: string;
@@ -35,41 +37,65 @@ interface TeamScreenProps {
   apiBaseUrl: string;
 }
 
+interface InviteFormData {
+  email: string;
+  role: 'admin' | 'member';
+}
+
+interface RedeemFormData {
+  inviteCode: string;
+}
+
 export function TeamScreen({ token, workspaceId, teamId, apiBaseUrl }: TeamScreenProps) {
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [invites, setInvites] = useState<TeamInvite[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // Invite Modal State
+  // Invite Modal Form State (react-hook-form)
   const [inviteModalVisible, setInviteModalVisible] = useState(false);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState<'admin' | 'member'>('member');
   const [inviting, setInviting] = useState(false);
+  const {
+    control: inviteControl,
+    handleSubmit: handleInviteSubmit,
+    reset: resetInviteForm,
+    formState: { errors: inviteErrors },
+  } = useForm<InviteFormData>({
+    defaultValues: {
+      email: '',
+      role: 'member',
+    },
+  });
 
-  // Accept Invite Modal State
+  // Accept Invite Modal Form State (react-hook-form)
   const [acceptModalVisible, setAcceptModalVisible] = useState(false);
-  const [inviteCodeInput, setInviteCodeInput] = useState('');
   const [accepting, setAccepting] = useState(false);
+  const {
+    control: redeemControl,
+    handleSubmit: handleRedeemSubmit,
+    reset: resetRedeemForm,
+    formState: { errors: redeemErrors },
+  } = useForm<RedeemFormData>({
+    defaultValues: {
+      inviteCode: '',
+    },
+  });
 
   const fetchTeamData = async () => {
     if (!teamId) return;
     setLoading(true);
     try {
-      // Fetch members
-      const mRes = await fetch(
-        `${apiBaseUrl}/trpc/team.getMembers?input=${encodeURIComponent(JSON.stringify({ teamId }))}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      const mData = await mRes.json();
-      if (mData.result?.data) setMembers(mData.result.data);
+      // Fetch members and invites via Axios apiClient
+      const [mRes, iRes] = await Promise.all([
+        apiClient.get(`${apiBaseUrl}/trpc/team.getMembers`, {
+          params: { input: JSON.stringify({ teamId }) },
+        }),
+        apiClient.get(`${apiBaseUrl}/trpc/team.getInvites`, {
+          params: { input: JSON.stringify({ teamId }) },
+        }),
+      ]);
 
-      // Fetch invites
-      const iRes = await fetch(
-        `${apiBaseUrl}/trpc/team.getInvites?input=${encodeURIComponent(JSON.stringify({ teamId }))}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      const iData = await iRes.json();
-      if (iData.result?.data) setInvites(iData.result.data);
+      if (mRes.data?.result?.data) setMembers(mRes.data.result.data);
+      if (iRes.data?.result?.data) setInvites(iRes.data.result.data);
     } catch (e) {
       console.log('Error fetching team:', e);
     } finally {
@@ -81,67 +107,50 @@ export function TeamScreen({ token, workspaceId, teamId, apiBaseUrl }: TeamScree
     fetchTeamData();
   }, [teamId, token]);
 
-  const handleSendInvite = async () => {
-    if (!inviteEmail.trim()) {
-      Alert.alert('Error', 'Please enter a valid email address');
-      return;
-    }
+  const onSendInvite = async (formData: InviteFormData) => {
     setInviting(true);
     try {
-      const res = await fetch(`${apiBaseUrl}/trpc/team.inviteMember`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          teamId,
-          workspaceId,
-          email: inviteEmail.trim(),
-          role: inviteRole,
-        }),
+      const res = await apiClient.post(`${apiBaseUrl}/trpc/team.inviteMember`, {
+        teamId,
+        workspaceId,
+        email: formData.email.trim(),
+        role: formData.role,
       });
-      const data = await res.json();
-      if (data.result?.data) {
-        Alert.alert('Invite Sent!', `Created invite code: ${data.result.data.inviteCode}`);
+
+      if (res.data?.result?.data) {
+        Alert.alert('Invite Sent!', `Created invite code: ${res.data.result.data.inviteCode}`);
         setInviteModalVisible(false);
-        setInviteEmail('');
+        resetInviteForm();
         fetchTeamData();
       } else {
-        throw new Error(data.error?.message || 'Failed to send invite');
+        throw new Error(res.data?.error?.message || 'Failed to send invite');
       }
     } catch (e: any) {
-      Alert.alert('Invite Failed', e.message);
+      const msg = e.response?.data?.error?.message || e.message || 'Failed to send invite';
+      Alert.alert('Invite Failed', msg);
     } finally {
       setInviting(false);
     }
   };
 
-  const handleAcceptInvite = async () => {
-    if (!inviteCodeInput.trim()) return;
+  const onAcceptInvite = async (formData: RedeemFormData) => {
     setAccepting(true);
     try {
-      const res = await fetch(`${apiBaseUrl}/trpc/team.acceptInvite`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          inviteCode: inviteCodeInput.trim().toUpperCase(),
-        }),
+      const res = await apiClient.post(`${apiBaseUrl}/trpc/team.acceptInvite`, {
+        inviteCode: formData.inviteCode.trim().toUpperCase(),
       });
-      const data = await res.json();
-      if (data.result?.data) {
+
+      if (res.data?.result?.data) {
         Alert.alert('Joined Team!', 'You have successfully joined the team!');
         setAcceptModalVisible(false);
-        setInviteCodeInput('');
+        resetRedeemForm();
         fetchTeamData();
       } else {
-        throw new Error(data.error?.message || 'Invalid or expired invite code');
+        throw new Error(res.data?.error?.message || 'Invalid or expired invite code');
       }
     } catch (e: any) {
-      Alert.alert('Failed to Join', e.message);
+      const msg = e.response?.data?.error?.message || e.message || 'Invalid or expired invite code';
+      Alert.alert('Failed to Join', msg);
     } finally {
       setAccepting(false);
     }
@@ -236,41 +245,67 @@ export function TeamScreen({ token, workspaceId, teamId, apiBaseUrl }: TeamScree
             </Text>
 
             <Text style={styles.label}>Email Address</Text>
-            <TextInput
-              style={styles.input}
-              value={inviteEmail}
-              onChangeText={setInviteEmail}
-              placeholder="colleague@company.com"
-              placeholderTextColor={COLORS.textMuted}
-              keyboardType="email-address"
-              autoCapitalize="none"
+            <Controller
+              control={inviteControl}
+              name="email"
+              rules={{
+                required: 'Email address is required',
+                pattern: {
+                  value: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+                  message: 'Please enter a valid email address',
+                },
+              }}
+              render={({ field: { onChange, onBlur, value } }) => (
+                <TextInput
+                  style={[styles.input, inviteErrors.email && styles.inputError]}
+                  value={value}
+                  onChangeText={onChange}
+                  onBlur={onBlur}
+                  placeholder="colleague@company.com"
+                  placeholderTextColor={COLORS.textMuted}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                />
+              )}
             />
+            {inviteErrors.email && (
+              <Text style={styles.errorText}>{inviteErrors.email.message}</Text>
+            )}
 
             <Text style={styles.label}>Access Role</Text>
-            <View style={styles.rolePickerRow}>
-              {(['member', 'admin'] as const).map(r => (
-                <TouchableOpacity
-                  key={r}
-                  style={[styles.roleChoice, inviteRole === r && styles.roleChoiceActive]}
-                  onPress={() => setInviteRole(r)}
-                >
-                  <Text style={[styles.roleChoiceText, inviteRole === r && styles.roleChoiceTextActive]}>
-                    {r.toUpperCase()}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
+            <Controller
+              control={inviteControl}
+              name="role"
+              render={({ field: { onChange, value } }) => (
+                <View style={styles.rolePickerRow}>
+                  {(['member', 'admin'] as const).map(r => (
+                    <TouchableOpacity
+                      key={r}
+                      style={[styles.roleChoice, value === r && styles.roleChoiceActive]}
+                      onPress={() => onChange(r)}
+                    >
+                      <Text style={[styles.roleChoiceText, value === r && styles.roleChoiceTextActive]}>
+                        {r.toUpperCase()}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+            />
 
             <View style={styles.modalBtnRow}>
               <TouchableOpacity
                 style={styles.cancelBtn}
-                onPress={() => setInviteModalVisible(false)}
+                onPress={() => {
+                  setInviteModalVisible(false);
+                  resetInviteForm();
+                }}
               >
                 <Text style={styles.cancelBtnText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.saveBtn}
-                onPress={handleSendInvite}
+                onPress={handleInviteSubmit(onSendInvite)}
                 disabled={inviting}
               >
                 {inviting ? (
@@ -294,25 +329,41 @@ export function TeamScreen({ token, workspaceId, teamId, apiBaseUrl }: TeamScree
             </Text>
 
             <Text style={styles.label}>Invite Code</Text>
-            <TextInput
-              style={styles.input}
-              value={inviteCodeInput}
-              onChangeText={setInviteCodeInput}
-              placeholder="e.g. INV-TUBO-9921"
-              placeholderTextColor={COLORS.textMuted}
-              autoCapitalize="characters"
+            <Controller
+              control={redeemControl}
+              name="inviteCode"
+              rules={{
+                required: 'Please enter an invite code',
+              }}
+              render={({ field: { onChange, onBlur, value } }) => (
+                <TextInput
+                  style={[styles.input, redeemErrors.inviteCode && styles.inputError]}
+                  value={value}
+                  onChangeText={onChange}
+                  onBlur={onBlur}
+                  placeholder="e.g. INV-TUBO-9921"
+                  placeholderTextColor={COLORS.textMuted}
+                  autoCapitalize="characters"
+                />
+              )}
             />
+            {redeemErrors.inviteCode && (
+              <Text style={styles.errorText}>{redeemErrors.inviteCode.message}</Text>
+            )}
 
             <View style={styles.modalBtnRow}>
               <TouchableOpacity
                 style={styles.cancelBtn}
-                onPress={() => setAcceptModalVisible(false)}
+                onPress={() => {
+                  setAcceptModalVisible(false);
+                  resetRedeemForm();
+                }}
               >
                 <Text style={styles.cancelBtnText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.saveBtn}
-                onPress={handleAcceptInvite}
+                onPress={handleRedeemSubmit(onAcceptInvite)}
                 disabled={accepting}
               >
                 {accepting ? (
@@ -584,5 +635,13 @@ const styles = StyleSheet.create({
   saveBtnText: {
     color: '#000',
     fontWeight: '800',
+  },
+  inputError: {
+    borderColor: COLORS.error,
+  },
+  errorText: {
+    color: COLORS.error,
+    fontSize: 11,
+    marginTop: 4,
   },
 });

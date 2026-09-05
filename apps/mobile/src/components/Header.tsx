@@ -1,5 +1,6 @@
 import React from 'react';
 import { StyleSheet, View, Text, TouchableOpacity, ScrollView } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '../theme';
 
 interface HeaderProps {
@@ -56,8 +57,15 @@ export function Header({
               {user.name ? user.name.charAt(0).toUpperCase() : 'U'}
             </Text>
           </View>
-          <TouchableOpacity style={styles.signOutBtn} onPress={onSignOut}>
-            <Text style={styles.signOutText}>Exit</Text>
+          <TouchableOpacity
+            style={styles.signOutBtn}
+            onPress={onSignOut}
+            activeOpacity={0.7}
+            accessibilityLabel="Log out"
+            accessibilityRole="button"
+          >
+            <Ionicons name="log-out-outline" size={15} color={COLORS.danger} style={styles.signOutIcon} />
+            <Text style={styles.signOutText}>Logout</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -197,17 +205,22 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
   signOutBtn: {
-    backgroundColor: COLORS.card,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(239, 68, 68, 0.08)',
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: COLORS.border,
+    borderColor: 'rgba(239, 68, 68, 0.25)',
+  },
+  signOutIcon: {
+    marginRight: 4,
   },
   signOutText: {
-    color: COLORS.textMuted,
+    color: COLORS.danger,
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   selectorSection: {
     marginBottom: 10,

@@ -10,62 +10,101 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { useForm, Controller } from 'react-hook-form';
 import { COLORS } from '../theme';
+import { apiClient, setApiBaseUrl } from '../utils/apiClient';
+
+interface AuthFormData {
+  email: string;
+  password: string;
+  name?: string;
+}
 
 interface AuthScreenProps {
-  onLoginSuccess: (token: string, user: { id: string; email: string; name: string }) => void;
+  onLoginSuccess: (
+    accessToken: string,
+    refreshToken: string,
+    user: { id: string; email: string; name: string }
+  ) => void;
   apiBaseUrl: string;
 }
 
 export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
   const [isLogin, setIsLogin] = useState(true);
-  const [email, setEmail] = useState('alex@tubo.dev');
-  const [password, setPassword] = useState('password123');
-  const [name, setName] = useState('Alex Vance');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [pingStatus, setPingStatus] = useState<string>('Ping API Status');
+  const [pingColor, setPingColor] = useState<string>(COLORS.textMuted);
 
-  const handleAuth = async () => {
+  const {
+    control,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<AuthFormData>({
+    defaultValues: {
+      email: 'alex@tubo.dev',
+      password: 'password123',
+      name: 'Alex Vance',
+    },
+  });
+
+  const onSubmit = async (formData: AuthFormData) => {
     setLoading(true);
     setErrorMsg('');
+    setApiBaseUrl(apiBaseUrl);
 
     try {
       const endpoint = isLogin ? '/trpc/auth.login' : '/trpc/auth.register';
       const bodyPayload = isLogin
-        ? { email, password }
-        : { email, password, name };
+        ? { email: formData.email.trim(), password: formData.password.trim() }
+        : {
+            email: formData.email.trim(),
+            password: formData.password.trim(),
+            name: (formData.name || '').trim(),
+          };
 
-      const response = await fetch(`${apiBaseUrl}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(bodyPayload),
-      });
+      const response = await apiClient.post(`${apiBaseUrl}${endpoint}`, bodyPayload);
+      const data = response.data;
 
-      const data = await response.json();
-
-      if (!response.ok || data.error) {
+      if (data.error) {
         throw new Error(data.error?.message || 'Authentication failed');
       }
 
       const result = data.result?.data;
-      if (result?.token && result?.user) {
-        onLoginSuccess(result.token, result.user);
+      if (result?.user && (result?.accessToken || result?.token)) {
+        const accessToken = result.accessToken || result.token;
+        const refreshToken = result.refreshToken || '';
+        onLoginSuccess(accessToken, refreshToken, result.user);
       } else {
-        throw new Error('Invalid authentication response');
+        throw new Error('Invalid authentication response from API');
       }
     } catch (err: any) {
-      setErrorMsg(err.message || 'Network request failed. Is the API server running?');
+      const msg =
+        err.response?.data?.error?.message ||
+        err.message ||
+        `Network request failed to ${apiBaseUrl}. Is the API server running?`;
+      setErrorMsg(msg);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleQuickDemo = () => {
-    onLoginSuccess('demo_token_alex_123', {
-      id: 'user_demo_123',
-      email: 'alex@tubo.dev',
-      name: 'Alex Vance',
-    });
+  const handlePing = async () => {
+    setPingStatus('Pinging...');
+    setPingColor(COLORS.textMuted);
+    try {
+      const res = await apiClient.get(`${apiBaseUrl}/health`, { timeout: 4000 });
+      if (res.status === 200) {
+        setPingStatus('API Online 🟢');
+        setPingColor(COLORS.primary);
+      } else {
+        setPingStatus('API Offline 🔴');
+        setPingColor(COLORS.danger);
+      }
+    } catch {
+      setPingStatus('API Offline 🔴');
+      setPingColor(COLORS.danger);
+    }
   };
 
   return (
@@ -97,47 +136,99 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
             </View>
           ) : null}
 
+          {/* Full Name Input (Register Only) */}
           {!isLogin && (
             <View style={styles.inputContainer}>
               <Text style={styles.label}>Full Name</Text>
-              <TextInput
-                style={styles.input}
-                value={name}
-                onChangeText={setName}
-                placeholder="e.g. Alex Vance"
-                placeholderTextColor={COLORS.textMuted}
+              <Controller
+                control={control}
+                name="name"
+                rules={{
+                  required: !isLogin ? 'Full name is required' : false,
+                  minLength: { value: 2, message: 'Name must be at least 2 characters' },
+                }}
+                render={({ field: { onChange, onBlur, value } }) => (
+                  <TextInput
+                    style={[styles.input, errors.name && styles.inputError]}
+                    value={value}
+                    onBlur={onBlur}
+                    onChangeText={onChange}
+                    placeholder="e.g. Alex Vance"
+                    placeholderTextColor={COLORS.textMuted}
+                  />
+                )}
               />
+              {errors.name && (
+                <Text style={styles.fieldErrorText}>{errors.name.message}</Text>
+              )}
             </View>
           )}
 
+          {/* Email Input */}
           <View style={styles.inputContainer}>
             <Text style={styles.label}>Email Address</Text>
-            <TextInput
-              style={styles.input}
-              value={email}
-              onChangeText={setEmail}
-              placeholder="name@company.com"
-              placeholderTextColor={COLORS.textMuted}
-              keyboardType="email-address"
-              autoCapitalize="none"
+            <Controller
+              control={control}
+              name="email"
+              rules={{
+                required: 'Email address is required',
+                pattern: {
+                  value: /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i,
+                  message: 'Invalid email address',
+                },
+              }}
+              render={({ field: { onChange, onBlur, value } }) => (
+                <TextInput
+                  style={[styles.input, errors.email && styles.inputError]}
+                  value={value}
+                  onBlur={onBlur}
+                  onChangeText={onChange}
+                  placeholder="name@company.com"
+                  placeholderTextColor={COLORS.textMuted}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+              )}
             />
+            {errors.email && (
+              <Text style={styles.fieldErrorText}>{errors.email.message}</Text>
+            )}
           </View>
 
+          {/* Password Input */}
           <View style={styles.inputContainer}>
             <Text style={styles.label}>Master Password</Text>
-            <TextInput
-              style={styles.input}
-              value={password}
-              onChangeText={setPassword}
-              placeholder="••••••••••••"
-              placeholderTextColor={COLORS.textMuted}
-              secureTextEntry
+            <Controller
+              control={control}
+              name="password"
+              rules={{
+                required: 'Password is required',
+                minLength: { value: 6, message: 'Password must be at least 6 characters' },
+              }}
+              render={({ field: { onChange, onBlur, value } }) => (
+                <TextInput
+                  style={[styles.input, errors.password && styles.inputError]}
+                  value={value}
+                  onBlur={onBlur}
+                  onChangeText={onChange}
+                  placeholder="••••••••••••"
+                  placeholderTextColor={COLORS.textMuted}
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+              )}
             />
+            {errors.password && (
+              <Text style={styles.fieldErrorText}>{errors.password.message}</Text>
+            )}
           </View>
 
+          {/* Submit Button */}
           <TouchableOpacity
             style={styles.primaryButton}
-            onPress={handleAuth}
+            onPress={handleSubmit(onSubmit)}
             disabled={loading}
             activeOpacity={0.8}
           >
@@ -150,6 +241,7 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
             )}
           </TouchableOpacity>
 
+          {/* Toggle Login/Register */}
           <TouchableOpacity
             style={styles.toggleButton}
             onPress={() => setIsLogin(!isLogin)}
@@ -161,19 +253,16 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
             </Text>
           </TouchableOpacity>
 
-          <View style={styles.divider}>
-            <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>DEMO MODE</Text>
-            <View style={styles.dividerLine} />
-          </View>
-
+          {/* Ping API Status */}
           <TouchableOpacity
-            style={styles.demoButton}
-            onPress={handleQuickDemo}
+            style={[styles.demoButton, { marginTop: 16, borderColor: pingColor }]}
+            onPress={handlePing}
             activeOpacity={0.8}
           >
-            <Text style={styles.demoButtonText}>⚡ Instant Demo Sign-In</Text>
+            <Text style={[styles.demoButtonText, { color: pingColor }]}>📡 {pingStatus}</Text>
           </TouchableOpacity>
+
+          <Text style={styles.urlIndicator}>Target: {apiBaseUrl}</Text>
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -245,6 +334,11 @@ const styles = StyleSheet.create({
     color: COLORS.danger,
     fontSize: 13,
   },
+  fieldErrorText: {
+    color: COLORS.danger,
+    fontSize: 12,
+    marginTop: 4,
+  },
   inputContainer: {
     marginBottom: 16,
   },
@@ -263,6 +357,9 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     color: COLORS.text,
     fontSize: 15,
+  },
+  inputError: {
+    borderColor: COLORS.danger,
   },
   primaryButton: {
     backgroundColor: COLORS.primary,
@@ -284,23 +381,6 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 13,
   },
-  divider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: 20,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: COLORS.border,
-  },
-  dividerText: {
-    color: COLORS.textMuted,
-    fontSize: 11,
-    fontWeight: '700',
-    marginHorizontal: 10,
-    letterSpacing: 1,
-  },
   demoButton: {
     backgroundColor: COLORS.surface,
     borderWidth: 1,
@@ -313,5 +393,11 @@ const styles = StyleSheet.create({
     color: COLORS.secondary,
     fontSize: 14,
     fontWeight: '700',
+  },
+  urlIndicator: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    textAlign: 'center',
+    marginTop: 8,
   },
 });

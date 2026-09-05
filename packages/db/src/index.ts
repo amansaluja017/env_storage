@@ -3,7 +3,8 @@ import { Pool } from 'pg';
 import * as postgresSchema from './schema/postgres.js';
 
 export * from './schema/postgres.js';
-export { eq, and, or, sql } from 'drizzle-orm';
+export * from './schema/sqlite.js';
+export { eq, and, or, sql, gt, isNull, lt, desc, asc, like, ilike, inArray, notInArray } from 'drizzle-orm';
 
 // Postgres initialization for API (Auth, Workspaces & Teams)
 const pgConnectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/tubo_db';

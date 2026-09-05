@@ -8,6 +8,13 @@
       "when": 1788435706869,
       "tag": "0000_short_umar",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788605338987,
+      "tag": "0001_chilly_karen_page",
+      "breakpoints": true
     }
   ]
 }

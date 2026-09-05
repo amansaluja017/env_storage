@@ -1,5 +1,4 @@
-import { pgDb, users, workspaces, workspaceMembers, teams, teamMembers, teamInvites, eq, and } from '@tubo/db';
-import { memoryUsers } from '../context.js';
+import { pgDb, users, workspaces, teams, teamMembers, teamInvites, eq, and, or } from '@tubo/db';
 
 export interface WorkspaceItem {
   id: string;
@@ -39,102 +38,53 @@ export interface TeamInviteItem {
   createdAt: Date;
 }
 
-// Memory fallbacks in case Postgres DB is not yet initialized locally
-const memoryWorkspaces: WorkspaceItem[] = [
-  {
-    id: 'ws_demo_main',
-    name: 'Acme Corp Production',
-    slug: 'acme-corp',
-    ownerId: 'user_demo_123',
-    createdAt: new Date(),
-  },
-  {
-    id: 'ws_demo_personal',
-    name: 'Personal Sandbox',
-    slug: 'personal-sandbox',
-    ownerId: 'user_demo_123',
-    createdAt: new Date(),
-  }
-];
+export interface EnvItem {
+  id: string;
+  workspaceId: string;
+  teamId: string;
+  environment: 'development' | 'staging' | 'production';
+  key: string;
+  value: string;
+  isSecret: boolean;
+  comment?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
-const memoryTeams: TeamItem[] = [
-  {
-    id: 'team_backend',
-    workspaceId: 'ws_demo_main',
-    name: 'Backend Core',
-    description: 'API, Microservices & Database infra envs',
-    createdAt: new Date(),
-  },
-  {
-    id: 'team_frontend',
-    workspaceId: 'ws_demo_main',
-    name: 'Mobile & Web Apps',
-    description: 'Expo Apps & Web dashboard envs',
-    createdAt: new Date(),
-  },
-  {
-    id: 'team_devops',
-    workspaceId: 'ws_demo_main',
-    name: 'DevOps & CI/CD',
-    description: 'Docker, K8s, AWS keys',
-    createdAt: new Date(),
-  }
-];
-
-const memoryTeamMembers: TeamMemberItem[] = [
-  {
-    id: 'tm_1',
-    teamId: 'team_backend',
-    userId: 'user_demo_123',
-    role: 'owner',
-    joinedAt: new Date(),
-    userName: 'Alex Vance',
-    userEmail: 'alex@tubo.dev',
-  },
-  {
-    id: 'tm_2',
-    teamId: 'team_backend',
-    userId: 'user_sarah_456',
-    role: 'admin',
-    joinedAt: new Date(),
-    userName: 'Sarah Jenkins',
-    userEmail: 'sarah@tubo.dev',
-  },
-  {
-    id: 'tm_3',
-    teamId: 'team_frontend',
-    userId: 'user_demo_123',
-    role: 'owner',
-    joinedAt: new Date(),
-    userName: 'Alex Vance',
-    userEmail: 'alex@tubo.dev',
-  }
-];
-
-const memoryTeamInvites: TeamInviteItem[] = [
-  {
-    id: 'inv_1',
-    teamId: 'team_backend',
-    workspaceId: 'ws_demo_main',
-    email: 'dev@acme.io',
-    role: 'member',
-    inviteCode: 'INV-TUBO-9921',
-    status: 'pending',
-    invitedBy: 'user_demo_123',
-    createdAt: new Date(),
-  }
-];
+// In-Memory runtime store for team-scoped environment variables (No SQLite / No DB)
+const envsStore: EnvItem[] = [];
 
 export const dataStore = {
-  // WORKSPACES
+  // WORKSPACES - Strictly from PostgreSQL
   async getWorkspacesForUser(userId: string): Promise<WorkspaceItem[]> {
-    try {
-      const res = await pgDb.select().from(workspaces).where(eq(workspaces.ownerId, userId));
-      if (res.length > 0) return res.map((r: any) => ({ ...r, createdAt: r.createdAt }));
-    } catch (e) {
-      // Fallback
+    // 1. Workspaces directly owned by user
+    const owned = await pgDb.select().from(workspaces).where(eq(workspaces.ownerId, userId));
+
+    // 2. Workspaces where user is a team member
+    const userTeams = await pgDb
+      .select({ workspaceId: teams.workspaceId })
+      .from(teamMembers)
+      .innerJoin(teams, eq(teamMembers.teamId, teams.id))
+      .where(eq(teamMembers.userId, userId));
+
+    const workspaceIds = new Set(owned.map(w => w.id));
+    for (const ut of userTeams) {
+      workspaceIds.add(ut.workspaceId);
     }
-    return memoryWorkspaces.filter(w => w.ownerId === userId || true); // return sample workspaces for demo
+
+    if (workspaceIds.size === 0) return [];
+
+    const all = await pgDb.select().from(workspaces);
+    return all
+      .filter(w => workspaceIds.has(w.id))
+      .map(r => ({
+        id: r.id,
+        name: r.name,
+        slug: r.slug,
+        ownerId: r.ownerId,
+        createdAt: r.createdAt,
+      }));
   },
 
   async createWorkspace(ws: { name: string; slug: string; ownerId: string }): Promise<WorkspaceItem> {
@@ -145,125 +95,293 @@ export const dataStore = {
       ownerId: ws.ownerId,
       createdAt: new Date(),
     };
-    try {
-      await pgDb.insert(workspaces).values(newItem);
-    } catch (e) {
-      // Fallback
-    }
-    memoryWorkspaces.push(newItem);
-    // Also create default team for new workspace
-    const defaultTeam: TeamItem = {
+    await pgDb.insert(workspaces).values(newItem);
+
+    const defaultTeam = {
       id: 'team_' + Math.random().toString(36).substring(2, 9),
       workspaceId: newItem.id,
       name: 'General Team',
       description: 'Default team for ' + ws.name,
       createdAt: new Date(),
     };
-    memoryTeams.push(defaultTeam);
+    await pgDb.insert(teams).values(defaultTeam);
+
+    await pgDb.insert(teamMembers).values({
+      id: 'tm_' + Math.random().toString(36).substring(2, 9),
+      teamId: defaultTeam.id,
+      userId: ws.ownerId,
+      role: 'owner',
+      joinedAt: new Date(),
+    });
+
     return newItem;
   },
 
-  // TEAMS
-  async getTeamsForWorkspace(workspaceId: string): Promise<TeamItem[]> {
-    try {
-      const res = await pgDb.select().from(teams).where(eq(teams.workspaceId, workspaceId));
-      if (res.length > 0) return res.map((r: any) => ({ ...r, createdAt: r.createdAt, description: r.description ?? undefined }));
-    } catch (e) {
-      // Fallback
+  // TEAMS - Strictly from PostgreSQL
+  async isUserInTeam(teamId: string, userId: string): Promise<boolean> {
+    // 1. Direct team membership
+    const member = await pgDb
+      .select()
+      .from(teamMembers)
+      .where(and(eq(teamMembers.teamId, teamId), eq(teamMembers.userId, userId)));
+    if (member.length > 0) return true;
+
+    // 2. Check if user is owner of the workspace containing the team
+    const teamRes = await pgDb.select().from(teams).where(eq(teams.id, teamId));
+    if (teamRes.length > 0) {
+      const ws = await pgDb.select().from(workspaces).where(eq(workspaces.id, teamRes[0].workspaceId));
+      if (ws.length > 0 && ws[0].ownerId === userId) return true;
     }
-    return memoryTeams.filter(t => t.workspaceId === workspaceId);
+
+    return false;
+  },
+
+  async getTeamsForUser(workspaceId: string, userId: string): Promise<TeamItem[]> {
+    // Check if user is workspace owner (owners see all teams in workspace)
+    const ws = await pgDb.select().from(workspaces).where(eq(workspaces.id, workspaceId));
+    const isOwner = ws.length > 0 && ws[0].ownerId === userId;
+
+    if (isOwner) {
+      const allTeams = await pgDb.select().from(teams).where(eq(teams.workspaceId, workspaceId));
+      return allTeams.map(t => ({
+        id: t.id,
+        workspaceId: t.workspaceId,
+        name: t.name,
+        description: t.description ?? undefined,
+        createdAt: t.createdAt,
+      }));
+    }
+
+    // Regular members only see teams they are actively enrolled in
+    const userTeams = await pgDb
+      .select({
+        id: teams.id,
+        workspaceId: teams.workspaceId,
+        name: teams.name,
+        description: teams.description,
+        createdAt: teams.createdAt,
+      })
+      .from(teamMembers)
+      .innerJoin(teams, eq(teamMembers.teamId, teams.id))
+      .where(and(eq(teams.workspaceId, workspaceId), eq(teamMembers.userId, userId)));
+
+    return userTeams.map(t => ({
+      id: t.id,
+      workspaceId: t.workspaceId,
+      name: t.name,
+      description: t.description ?? undefined,
+      createdAt: t.createdAt,
+    }));
+  },
+
+  async getTeamsForWorkspace(workspaceId: string): Promise<TeamItem[]> {
+    const res = await pgDb.select().from(teams).where(eq(teams.workspaceId, workspaceId));
+    return res.map(t => ({
+      id: t.id,
+      workspaceId: t.workspaceId,
+      name: t.name,
+      description: t.description ?? undefined,
+      createdAt: t.createdAt,
+    }));
   },
 
   async createTeam(t: { workspaceId: string; name: string; description?: string; ownerId: string }): Promise<TeamItem> {
-    const newTeam: TeamItem = {
+    const newTeam = {
       id: 'team_' + Math.random().toString(36).substring(2, 9),
       workspaceId: t.workspaceId,
       name: t.name,
-      description: t.description,
+      description: t.description || null,
       createdAt: new Date(),
     };
-    try {
-      await pgDb.insert(teams).values(newTeam);
-    } catch (e) {
-      // Fallback
-    }
-    memoryTeams.push(newTeam);
+    await pgDb.insert(teams).values(newTeam);
 
-    // Add creator as member
-    const ownerMember: TeamMemberItem = {
+    await pgDb.insert(teamMembers).values({
       id: 'tm_' + Math.random().toString(36).substring(2, 9),
       teamId: newTeam.id,
       userId: t.ownerId,
       role: 'owner',
       joinedAt: new Date(),
-      userName: 'Team Owner',
+    });
+
+    return {
+      id: newTeam.id,
+      workspaceId: newTeam.workspaceId,
+      name: newTeam.name,
+      description: newTeam.description ?? undefined,
+      createdAt: newTeam.createdAt,
     };
-    memoryTeamMembers.push(ownerMember);
-
-    return newTeam;
   },
 
-  // TEAM MEMBERS
+  // TEAM MEMBERS - Strictly from PostgreSQL with User joins
   async getTeamMembers(teamId: string): Promise<TeamMemberItem[]> {
-    try {
-      const res = await pgDb.select().from(teamMembers).where(eq(teamMembers.teamId, teamId));
-      if (res.length > 0) return res.map((r: any) => ({ ...r, role: r.role, joinedAt: r.joinedAt }));
-    } catch (e) {
-      // Fallback
-    }
-    return memoryTeamMembers.filter(m => m.teamId === teamId);
+    const res = await pgDb
+      .select({
+        id: teamMembers.id,
+        teamId: teamMembers.teamId,
+        userId: teamMembers.userId,
+        role: teamMembers.role,
+        joinedAt: teamMembers.joinedAt,
+        userName: users.name,
+        userEmail: users.email,
+      })
+      .from(teamMembers)
+      .leftJoin(users, eq(teamMembers.userId, users.id))
+      .where(eq(teamMembers.teamId, teamId));
+
+    return res.map(r => ({
+      id: r.id,
+      teamId: r.teamId,
+      userId: r.userId,
+      role: r.role,
+      joinedAt: r.joinedAt,
+      userName: r.userName || undefined,
+      userEmail: r.userEmail || undefined,
+    }));
   },
 
-  // INVITES
-  async createInvite(inv: { teamId: string; workspaceId: string; email: string; role: 'admin' | 'member'; invitedBy: string }): Promise<TeamInviteItem> {
+  // INVITES - Strictly from PostgreSQL
+  async createInvite(inv: {
+    teamId: string;
+    workspaceId: string;
+    email: string;
+    role: 'admin' | 'member';
+    invitedBy: string;
+  }): Promise<TeamInviteItem> {
     const code = 'INV-TUBO-' + Math.floor(1000 + Math.random() * 9000);
-    const newInvite: TeamInviteItem = {
+    const newInvite = {
       id: 'inv_' + Math.random().toString(36).substring(2, 9),
       teamId: inv.teamId,
       workspaceId: inv.workspaceId,
       email: inv.email,
       role: inv.role,
       inviteCode: code,
-      status: 'pending',
+      status: 'pending' as const,
       invitedBy: inv.invitedBy,
       createdAt: new Date(),
     };
-    try {
-      await pgDb.insert(teamInvites).values(newInvite);
-    } catch (e) {
-      // Fallback
-    }
-    memoryTeamInvites.push(newInvite);
+    await pgDb.insert(teamInvites).values(newInvite);
     return newInvite;
   },
 
   async getInvitesForTeam(teamId: string): Promise<TeamInviteItem[]> {
-    try {
-      const res = await pgDb.select().from(teamInvites).where(eq(teamInvites.teamId, teamId));
-      if (res.length > 0) return res.map((r: any) => ({ ...r, role: r.role, status: r.status, createdAt: r.createdAt }));
-    } catch (e) {
-      // Fallback
-    }
-    return memoryTeamInvites.filter(i => i.teamId === teamId);
+    const res = await pgDb.select().from(teamInvites).where(eq(teamInvites.teamId, teamId));
+    return res.map(r => ({
+      id: r.id,
+      teamId: r.teamId,
+      workspaceId: r.workspaceId,
+      email: r.email,
+      role: r.role,
+      inviteCode: r.inviteCode,
+      status: r.status,
+      invitedBy: r.invitedBy,
+      createdAt: r.createdAt,
+    }));
   },
 
-  async acceptInvite(inviteCode: string, userId: string, userName: string, userEmail: string): Promise<TeamMemberItem> {
-    const invite = memoryTeamInvites.find(i => i.inviteCode === inviteCode && i.status === 'pending');
-    if (!invite) {
+  async acceptInvite(inviteCode: string, userId: string, userName?: string, userEmail?: string): Promise<TeamMemberItem> {
+    const invites = await pgDb
+      .select()
+      .from(teamInvites)
+      .where(and(eq(teamInvites.inviteCode, inviteCode), eq(teamInvites.status, 'pending')));
+
+    if (invites.length === 0) {
       throw new Error('Invalid or expired invite code');
     }
-    invite.status = 'accepted';
+    const invite = invites[0];
 
-    const newMember: TeamMemberItem = {
+    await pgDb
+      .update(teamInvites)
+      .set({ status: 'accepted' })
+      .where(eq(teamInvites.id, invite.id));
+
+    const newMember = {
       id: 'tm_' + Math.random().toString(36).substring(2, 9),
       teamId: invite.teamId,
       userId: userId,
       role: invite.role,
       joinedAt: new Date(),
-      userName: userName,
-      userEmail: userEmail,
     };
-    memoryTeamMembers.push(newMember);
-    return newMember;
-  }
+    await pgDb.insert(teamMembers).values(newMember);
+
+    const userRes = await pgDb.select().from(users).where(eq(users.id, userId));
+    const u = userRes[0];
+
+    return {
+      id: newMember.id,
+      teamId: newMember.teamId,
+      userId: newMember.userId,
+      role: newMember.role,
+      joinedAt: newMember.joinedAt,
+      userName: u?.name || userName || undefined,
+      userEmail: u?.email || userEmail || undefined,
+    };
+  },
+
+  // ENVIRONMENT VARIABLES (In-Memory Runtime Store, No SQLite / No DB)
+  async getEnvs(workspaceId: string, teamId: string, environment: 'development' | 'staging' | 'production'): Promise<EnvItem[]> {
+    return envsStore.filter(
+      e => e.workspaceId === workspaceId && e.teamId === teamId && e.environment === environment
+    );
+  },
+
+  async upsertEnv(data: {
+    id?: string;
+    workspaceId: string;
+    teamId: string;
+    environment: 'development' | 'staging' | 'production';
+    key: string;
+    value: string;
+    isSecret?: boolean;
+    comment?: string;
+    createdBy: string;
+  }): Promise<EnvItem> {
+    const now = new Date().toISOString();
+    const existingIndex = data.id
+      ? envsStore.findIndex(e => e.id === data.id)
+      : envsStore.findIndex(
+          e =>
+            e.workspaceId === data.workspaceId &&
+            e.teamId === data.teamId &&
+            e.environment === data.environment &&
+            e.key.toUpperCase() === data.key.toUpperCase()
+        );
+
+    if (existingIndex >= 0) {
+      const existing = envsStore[existingIndex];
+      const updated: EnvItem = {
+        ...existing,
+        key: data.key.toUpperCase().trim(),
+        value: data.value,
+        isSecret: data.isSecret !== undefined ? Boolean(data.isSecret) : existing.isSecret,
+        comment: data.comment !== undefined ? data.comment : existing.comment,
+        updatedAt: now,
+      };
+      envsStore[existingIndex] = updated;
+      return updated;
+    }
+
+    const newEnv: EnvItem = {
+      id: data.id || 'env_' + Math.random().toString(36).substring(2, 10),
+      workspaceId: data.workspaceId,
+      teamId: data.teamId,
+      environment: data.environment,
+      key: data.key.toUpperCase().trim(),
+      value: data.value,
+      isSecret: data.isSecret !== undefined ? Boolean(data.isSecret) : true,
+      comment: data.comment,
+      createdBy: data.createdBy,
+      createdAt: now,
+      updatedAt: now,
+    };
+    envsStore.push(newEnv);
+    return newEnv;
+  },
+
+  async deleteEnv(id: string, teamId: string): Promise<boolean> {
+    const idx = envsStore.findIndex(e => e.id === id && e.teamId === teamId);
+    if (idx >= 0) {
+      envsStore.splice(idx, 1);
+    }
+    return true;
+  },
 };
