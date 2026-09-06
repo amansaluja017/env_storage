@@ -1,7 +1,7 @@
 import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
 
 export const folders = sqliteTable('folders', {
-  id: text('id').primaryKey(),
+  id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
   workspaceId: text('workspace_id').notNull(),
   teamId: text('team_id').notNull(),
   environment: text('environment').$type<'development' | 'staging' | 'production'>().default('development').notNull(),
@@ -13,7 +13,7 @@ export const folders = sqliteTable('folders', {
 });
 
 export const envs = sqliteTable('envs', {
-  id: text('id').primaryKey(),
+  id: text('id').primaryKey().$defaultFn(() => crypto.randomUUID()),
   workspaceId: text('workspace_id').notNull(),
   teamId: text('team_id').notNull(),
   environment: text('environment').$type<'development' | 'staging' | 'production'>().default('development').notNull(),

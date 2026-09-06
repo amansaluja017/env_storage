@@ -14,7 +14,29 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
-import { DatabaseSync } from 'node:sqlite';
+
+// Check Node.js version support for node:sqlite DatabaseSync (Node 22.13.0+ or 23.4.0+)
+const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
+const isSupportedNode =
+  (nodeMajor === 22 && nodeMinor >= 13) || (nodeMajor === 23 && nodeMinor >= 4) || nodeMajor > 23;
+
+if (!isSupportedNode) {
+  console.error(
+    `\x1b[31mError: node:sqlite DatabaseSync requires Node.js >= 22.13.0 or >= 23.4.0. Current Node version is ${process.version}.\x1b[0m`
+  );
+  process.exit(1);
+}
+
+let DatabaseSync;
+try {
+  const sqlite = await import('node:sqlite');
+  DatabaseSync = sqlite.DatabaseSync;
+} catch (err) {
+  console.error(
+    `\x1b[31mError loading node:sqlite DatabaseSync: ${err.message}. Node.js >= 22.13.0 or >= 23.4.0 is required.\x1b[0m`
+  );
+  process.exit(1);
+}
 
 // Colors for terminal formatting
 const c = {
@@ -59,9 +81,6 @@ function visualWidth(str) {
   return len;
 }
 
-// Clean empty seed data (no mock envs)
-const SEED_DATA = [];
-
 function printHelp() {
   console.log(`
 ${c.bold}${c.cyan}TUBO MOBILE SQLITE DB INSPECTOR${c.reset}
@@ -80,7 +99,6 @@ ${c.bold}OPTIONS:${c.reset}
   ${c.green}--json${c.reset}                    Output results in raw JSON format
   ${c.green}--db <path>${c.reset}               Custom path to SQLite database file
   ${c.green}--pull${c.reset}                    Attempt to pull mobile_env_vault.db from connected Android device via ADB
-  ${c.green}--seed${c.reset}                    Seed default development items into local mobile_env_vault.db
   ${c.green}-h, --help${c.reset}                Show this help message
 
 ${c.bold}EXAMPLES:${c.reset}
@@ -112,7 +130,6 @@ function parseArgs(args) {
     json: false,
     dbPath: null,
     pull: false,
-    seed: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -144,8 +161,6 @@ function parseArgs(args) {
       options.dbPath = arg.split('=')[1];
     } else if (arg === '--pull') {
       options.pull = true;
-    } else if (arg === '--seed') {
-      options.seed = true;
     } else if (!arg.startsWith('-') && !options.dbPath && arg.endsWith('.db')) {
       options.dbPath = arg;
     }
@@ -230,10 +245,8 @@ function resolveDatabasePath(customPath, pullFlag) {
   return resolvedDefault;
 }
 
-// Initialize and seed database if missing or requested
-function ensureDatabase(dbPath, forceSeed = false) {
-  const exists = fs.existsSync(dbPath);
-
+// Initialize database tables if missing
+function ensureDatabase(dbPath) {
   const db = new DatabaseSync(dbPath);
 
   // Initialize tables
@@ -269,37 +282,6 @@ function ensureDatabase(dbPath, forceSeed = false) {
   try {
     db.exec(`ALTER TABLE envs ADD COLUMN folder_id TEXT;`);
   } catch {}
-
-  const countRow = db.prepare('SELECT COUNT(*) as count FROM envs').get();
-  const count = countRow ? countRow.count : 0;
-
-  if (count === 0 || forceSeed) {
-    const insertStmt = db.prepare(`
-      INSERT OR REPLACE INTO envs (
-        id, workspace_id, team_id, environment, key, value, is_secret, comment, created_by, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    for (const item of SEED_DATA) {
-      insertStmt.run(
-        item.id,
-        item.workspaceId,
-        item.teamId,
-        item.environment,
-        item.key,
-        item.value,
-        item.isSecret,
-        item.comment,
-        item.createdBy,
-        item.createdAt,
-        item.updatedAt
-      );
-    }
-
-    if (!exists || forceSeed) {
-      console.log(`${c.green}✔ Initialized SQLite database with ${SEED_DATA.length} default environment records.${c.reset}\n`);
-    }
-  }
 
   return db;
 }
@@ -412,7 +394,7 @@ function main() {
   const options = parseArgs(args);
 
   const dbPath = resolveDatabasePath(options.dbPath, options.pull);
-  const db = ensureDatabase(dbPath, options.seed);
+  const db = ensureDatabase(dbPath);
 
   // Retrieve SQLite metadata
   let stats;
@@ -433,10 +415,12 @@ function main() {
       console.log(JSON.stringify(rows, null, 2));
     } else {
       let query = `SELECT * FROM ${options.table}`;
+      const params = [];
       if (options.env && options.table === 'envs') {
-        query += ` WHERE environment = '${options.env}'`;
+        query += ` WHERE environment = ?`;
+        params.push(options.env);
       }
-      const rows = db.prepare(query).all();
+      const rows = db.prepare(query).all(...params);
       console.log(JSON.stringify(rows, null, 2));
     }
     return;
@@ -484,9 +468,11 @@ function main() {
   // Default: View 'envs' table
   let sql = 'SELECT id, workspace_id, team_id, environment, key, value, is_secret, comment, created_by, updated_at FROM envs';
   const conditions = [];
+  const params = [];
 
   if (options.env) {
-    conditions.push(`environment = '${options.env.replace(/'/g, "''")}'`);
+    conditions.push('environment = ?');
+    params.push(options.env);
   }
 
   if (conditions.length > 0) {
@@ -496,7 +482,7 @@ function main() {
   sql += ' ORDER BY environment ASC, key ASC';
 
   try {
-    const rows = db.prepare(sql).all();
+    const rows = db.prepare(sql).all(...params);
 
     console.log(`${c.bold}TABLE:${c.reset} ${c.yellow}envs${c.reset} ${options.env ? `(${c.cyan}filter: ${options.env}${c.reset})` : ''}`);
     if (!options.showSecrets) {

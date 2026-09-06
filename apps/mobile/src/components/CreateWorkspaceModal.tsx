@@ -10,8 +10,10 @@ import {
   Alert,
 } from 'react-native';
 import { useForm, Controller } from 'react-hook-form';
+import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '../theme';
 import { apiClient } from '../utils/apiClient';
+import { showCustomAlert } from './CustomAlert';
 
 interface CreateWorkspaceFormData {
   name: string;
@@ -60,12 +62,21 @@ export function CreateWorkspaceModal({
         onCreated(data.result.data);
         reset();
         onClose();
+        showCustomAlert({
+          title: 'Workspace Created!',
+          message: `Workspace "${data.result.data.name}" was successfully created.`,
+          type: 'success',
+        });
       } else {
         throw new Error(data.error?.message || 'Failed to create workspace');
       }
     } catch (e: any) {
       const msg = e.response?.data?.error?.message || e.message || 'Unable to create workspace';
-      Alert.alert('Error', msg);
+      showCustomAlert({
+        title: 'Workspace Error',
+        message: msg,
+        type: 'danger',
+      });
     } finally {
       setSubmitting(false);
     }
@@ -80,10 +91,20 @@ export function CreateWorkspaceModal({
     <Modal visible={visible} animationType="slide" transparent onRequestClose={handleClose}>
       <View style={styles.modalOverlay}>
         <View style={styles.modalCard}>
-          <Text style={styles.modalTitle}>🏢 Create Workspace</Text>
-          <Text style={styles.modalSubtitle}>
-            Workspaces organize teams, projects, and environment variables.
-          </Text>
+          <View style={styles.headerRow}>
+            <View style={styles.headerLeft}>
+              <View style={styles.titleIconBox}>
+                <Ionicons name="business" size={18} color={COLORS.primary} />
+              </View>
+              <View>
+                <Text style={styles.modalTitle}>Create Workspace</Text>
+                <Text style={styles.modalSubtitle}>Organize teams and environment vaults</Text>
+              </View>
+            </View>
+            <TouchableOpacity style={styles.closeBtn} onPress={handleClose} activeOpacity={0.7}>
+              <Ionicons name="close" size={18} color={COLORS.textSubtle} />
+            </TouchableOpacity>
+          </View>
 
           <Text style={styles.label}>Workspace Name *</Text>
           <Controller
@@ -91,7 +112,7 @@ export function CreateWorkspaceModal({
             name="name"
             rules={{
               required: 'Workspace name is required',
-              minLength: { value: 2, message: 'Name must be at least 2 characters' },
+              validate: (val) => (val ? val.trim().length >= 2 : false) || 'Name must be at least 2 characters',
             }}
             render={({ field: { onChange, onBlur, value } }) => (
               <TextInput
@@ -126,16 +147,20 @@ export function CreateWorkspaceModal({
           />
 
           <View style={styles.modalBtnRow}>
-            <TouchableOpacity style={styles.cancelBtn} onPress={handleClose}>
+            <TouchableOpacity style={styles.cancelBtn} onPress={handleClose} activeOpacity={0.7}>
               <Text style={styles.cancelBtnText}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={styles.submitBtn}
+              style={[styles.submitBtn, submitting && { opacity: 0.7 }]}
               onPress={handleSubmit(onSubmit)}
               disabled={submitting}
+              activeOpacity={0.8}
             >
               {submitting ? (
-                <ActivityIndicator color="#000" />
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <ActivityIndicator color="#000" size="small" style={{ marginRight: 6 }} />
+                  <Text style={styles.submitBtnText}>Creating...</Text>
+                </View>
               ) : (
                 <Text style={styles.submitBtnText}>Create Workspace</Text>
               )}
@@ -161,17 +186,47 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
   },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  titleIconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  closeBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   modalTitle: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: '800',
     color: COLORS.text,
-    marginBottom: 6,
+    marginBottom: 2,
   },
   modalSubtitle: {
-    fontSize: 13,
+    fontSize: 12,
     color: COLORS.textMuted,
-    marginBottom: 20,
-    lineHeight: 18,
   },
   label: {
     fontSize: 12,

@@ -5,15 +5,64 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1788435706869,
-      "tag": "0000_short_umar",
+      "when": 1788694603847,
+      "tag": "0000_large_lady_deathstrike",
       "breakpoints": true
     },
     {
       "idx": 1,
       "version": "7",
-      "when": 1788605338987,
-      "tag": "0001_chilly_karen_page",
+      "when": 1788695501584,
+      "tag": "0001_concerned_dormammu",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788701375329,
+      "tag": "0002_panoramic_luke_cage",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788703843835,
+      "tag": "0003_strong_falcon",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788716934233,
+      "tag": "0004_sour_manta",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788720299427,
+      "tag": "0005_medical_talkback",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788721582938,
+      "tag": "0006_wooden_whistler",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788722783046,
+      "tag": "0007_flashy_switch",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788724223784,
+      "tag": "0008_adorable_dagger",
       "breakpoints": true
     }
   ]

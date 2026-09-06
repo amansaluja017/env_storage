@@ -4,9 +4,13 @@ import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 import { router, publicProcedure, protectedProcedure } from '../trpc.js';
 import { JWT_SECRET, JWT_REFRESH_SECRET } from '../context.js';
-import { pgDb, users, eq } from '@tubo/db';
+import { pgDb, users, teamInvites, teams, workspaces, eq } from '@tubo/db';
 import { TRPCError } from '@trpc/server';
 import { tokenStore } from '../storage/tokenStore.js';
+import {
+  sendEmailVerificationEmail,
+  sendPasswordResetEmail,
+} from '../services/emailService.js';
 
 // Token Expirations
 const ACCESS_TOKEN_EXPIRY = '15m'; // 15 minutes for access token
@@ -17,15 +21,19 @@ const PASSWORD_RESET_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
 /**
  * Utility to generate Access Token and persist Refresh Token in DB tokens table
  */
-async function generateAndStoreTokens(payload: { id: string; email: string; name: string }) {
+async function generateAndStoreTokens(payload: { id: string; email: string; name: string; role?: 'admin' | 'member' }) {
+  const tokenPayload: any = { id: payload.id, email: payload.email, name: payload.name, type: 'access' };
+  if (payload.role) tokenPayload.role = payload.role;
   const accessToken = jwt.sign(
-    { id: payload.id, email: payload.email, name: payload.name, type: 'access' },
+    tokenPayload,
     JWT_SECRET,
     { expiresIn: ACCESS_TOKEN_EXPIRY }
   );
 
+  const refreshTokenPayload: any = { id: payload.id, email: payload.email, name: payload.name, type: 'refresh' };
+  if (payload.role) refreshTokenPayload.role = payload.role;
   const refreshToken = jwt.sign(
-    { id: payload.id, email: payload.email, name: payload.name, type: 'refresh' },
+    refreshTokenPayload,
     JWT_REFRESH_SECRET,
     { expiresIn: '30d' }
   );
@@ -69,7 +77,7 @@ export const authRouter = router({
       }
 
       const passwordHash = await bcrypt.hash(input.password, 10);
-      const userId = 'user_' + Math.random().toString(36).substring(2, 10);
+      const userId = crypto.randomUUID();
 
       // Save strictly to PostgreSQL
       await pgDb.insert(users).values({
@@ -161,21 +169,29 @@ export const authRouter = router({
         });
       }
 
-      // 2. Cryptographic signature verification
+      // 2. Atomically consume the token first (conditional update ensuring consumed_at is null)
+      const consumed = await tokenStore.consumeToken(input.refreshToken);
+      if (!consumed) {
+        // Token was already consumed (reuse attack) - revoke user's remaining refresh tokens
+        if (tokenRecord.userId) {
+          await tokenStore.revokeUserTokens(tokenRecord.userId, 'refreshToken');
+        }
+        throw new TRPCError({
+          code: 'UNAUTHORIZED',
+          message: 'Refresh token was already used or revoked. Please sign in again.',
+        });
+      }
+
+      // 3. Cryptographic signature verification
       let decoded: { id: string; email: string; name: string };
       try {
         decoded = jwt.verify(input.refreshToken, JWT_REFRESH_SECRET) as any;
       } catch (err: any) {
-        // Invalidate DB token record if signature is invalid
-        await tokenStore.consumeToken(tokenRecord.id);
         throw new TRPCError({
           code: 'UNAUTHORIZED',
           message: 'Malformed or expired refresh token signature.',
         });
       }
-
-      // 3. Mark the used refresh token as consumed (token rotation)
-      await tokenStore.consumeToken(tokenRecord.id);
 
       // 4. Locate user strictly in Postgres DB
       const targetUserId = tokenRecord.userId || decoded.id;
@@ -219,12 +235,27 @@ export const authRouter = router({
         .optional()
     )
     .mutation(async ({ input, ctx }) => {
-      if (input?.refreshToken) {
-        await tokenStore.consumeToken(input.refreshToken);
+      if (!ctx.user?.id && !input?.refreshToken) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Authentication session or refresh token is required to log out.',
+        });
       }
+
+      if (input?.refreshToken) {
+        const consumed = await tokenStore.consumeToken(input.refreshToken);
+        if (!consumed && !ctx.user?.id) {
+          throw new TRPCError({
+            code: 'UNAUTHORIZED',
+            message: 'Invalid or already consumed refresh token.',
+          });
+        }
+      }
+
       if (ctx.user?.id) {
         await tokenStore.revokeUserTokens(ctx.user.id, 'refreshToken');
       }
+
       return {
         success: true,
         message: 'Logged out successfully',
@@ -243,14 +274,16 @@ export const authRouter = router({
     )
     .mutation(async ({ input }) => {
       const email = input.email.toLowerCase().trim();
+      const ACK_MESSAGE =
+        'If an account exists with this email address, password reset instructions have been generated.';
 
       // Find user strictly in Postgres DB
       const res = await pgDb.select().from(users).where(eq(users.email, email));
       if (res.length === 0) {
-        // Return friendly message without leaking user existence
+        // Return neutral message without leaking user existence
         return {
           success: true,
-          message: 'If an account exists with this email, password reset instructions have been generated.',
+          message: ACK_MESSAGE,
         };
       }
 
@@ -261,7 +294,7 @@ export const authRouter = router({
 
       // Generate secure reset token
       const resetToken = 'rst_' + crypto.randomBytes(24).toString('hex');
-      const tokenRecord = await tokenStore.createToken({
+      await tokenStore.createToken({
         userId: foundUser.id,
         type: 'passwordResetToken',
         token: resetToken,
@@ -269,11 +302,16 @@ export const authRouter = router({
         metadata: { email: foundUser.email },
       });
 
+      const publicBaseUrl = (
+        process.env.APP_PUBLIC_URL || `http://localhost:${process.env.PORT || 4000}`
+      ).replace(/\/+$/, '');
+      const resetUrl = `${publicBaseUrl}/auth/reset-password?token=${resetToken}`;
+      const mailResult = await sendPasswordResetEmail(foundUser.email, resetUrl);
+
       return {
         success: true,
-        message: 'Password reset token generated successfully.',
-        resetToken: tokenRecord.token,
-        expiresAt: tokenRecord.expiresAt,
+        message: ACK_MESSAGE,
+        previewUrl: mailResult.previewUrl,
       };
     }),
 
@@ -298,17 +336,23 @@ export const authRouter = router({
         });
       }
 
-      // 2. Hash new password
+      // 2. Consume the reset token atomically
+      const consumed = await tokenStore.consumeToken(input.token);
+      if (!consumed) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Invalid, already used, or expired password reset token.',
+        });
+      }
+
+      // 3. Hash new password
       const newPasswordHash = await bcrypt.hash(input.newPassword, 10);
 
-      // 3. Update password strictly in PostgreSQL
+      // 4. Update password strictly in PostgreSQL
       await pgDb
         .update(users)
         .set({ passwordHash: newPasswordHash })
         .where(eq(users.id, tokenRecord.userId));
-
-      // 4. Consume the reset token in PostgreSQL
-      await tokenStore.consumeToken(tokenRecord.id);
 
       // 5. Revoke all existing refresh tokens for security in PostgreSQL
       await tokenStore.revokeUserTokens(tokenRecord.userId, 'refreshToken');
@@ -326,7 +370,7 @@ export const authRouter = router({
     .input(
       z.object({
         token: z.string().min(1),
-        type: z.enum(['refreshToken', 'verificationToken', 'passwordResetToken', 'teamInviteToken']),
+        type: z.enum(['verificationToken', 'passwordResetToken', 'inviteToken', 'refreshToken']),
       })
     )
     .query(async ({ input }) => {
@@ -343,4 +387,185 @@ export const authRouter = router({
       user: ctx.user,
     };
   }),
+
+  /**
+   * Fetch full account information and team invites
+   */
+  getAccountInfo: protectedProcedure.query(async ({ ctx }) => {
+    const res = await pgDb.select().from(users).where(eq(users.id, ctx.user.id));
+    if (res.length === 0) {
+      throw new TRPCError({
+        code: 'NOT_FOUND',
+        message: 'User account not found',
+      });
+    }
+
+    const currentUser = res[0];
+    const userCode = `TUBO-${currentUser.name.replace(/[^a-zA-Z0-9]/g, '').slice(0, 4).toUpperCase()}-${currentUser.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+
+    // Look for any team invites sent to this user's email
+    const invites = await pgDb
+      .select({
+        id: teamInvites.id,
+        inviteCode: teamInvites.inviteCode,
+        email: teamInvites.email,
+        role: teamInvites.role,
+        status: teamInvites.status,
+        teamId: teamInvites.teamId,
+        workspaceId: teamInvites.workspaceId,
+        createdAt: teamInvites.createdAt,
+        teamName: teams.name,
+      })
+      .from(teamInvites)
+      .leftJoin(teams, eq(teamInvites.teamId, teams.id))
+      .where(eq(teamInvites.email, currentUser.email.toLowerCase().trim()));
+
+    const activeInvite = invites.find(i => i.status === 'pending');
+
+    return {
+      user: {
+        id: currentUser.id,
+        name: currentUser.name,
+        email: currentUser.email,
+        createdAt: currentUser.createdAt,
+      },
+      userCode,
+      activeInviteCode: activeInvite ? activeInvite.inviteCode : null,
+      invites,
+    };
+  }),
+
+  /**
+   * Request Account Email Change
+   * Validates current password, checks availability, generates verificationToken,
+   * and sends an email verification link via Nodemailer (Gmail)
+   */
+  requestEmailChange: protectedProcedure
+    .input(
+      z.object({
+        newEmail: z.string().email('Please enter a valid email address'),
+        currentPassword: z.string().min(1, 'Current password is required to verify your identity'),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const newEmail = input.newEmail.toLowerCase().trim();
+
+      const res = await pgDb.select().from(users).where(eq(users.id, ctx.user.id));
+      if (res.length === 0) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'User account not found',
+        });
+      }
+
+      const currentUser = res[0];
+
+      // Verify current password
+      const isPasswordValid = await bcrypt.compare(input.currentPassword, currentUser.passwordHash);
+      if (!isPasswordValid) {
+        throw new TRPCError({
+          code: 'UNAUTHORIZED',
+          message: 'Incorrect current password. Please try again.',
+        });
+      }
+
+      // If same email, nothing to update
+      if (newEmail === currentUser.email.toLowerCase().trim()) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Your account is already registered with this email address.',
+        });
+      }
+
+      // Verify new email is not already taken by another user
+      const existing = await pgDb.select().from(users).where(eq(users.email, newEmail));
+      if (existing.length > 0) {
+        throw new TRPCError({
+          code: 'CONFLICT',
+          message: 'This email address is already registered to another account.',
+        });
+      }
+
+      // Invalidate any existing verificationToken for this user
+      await tokenStore.revokeUserTokens(currentUser.id, 'verificationToken');
+
+      // Generate verification token (24h expiry)
+      const verifyToken = 'vfy_' + crypto.randomBytes(24).toString('hex');
+      await tokenStore.createToken({
+        userId: currentUser.id,
+        type: 'verificationToken',
+        token: verifyToken,
+        expiresInMs: 24 * 60 * 60 * 1000,
+        metadata: JSON.stringify({ newEmail, userId: currentUser.id }),
+      });
+
+      const publicBaseUrl = (
+        process.env.APP_PUBLIC_URL || `http://localhost:${process.env.PORT || 4000}`
+      ).replace(/\/+$/, '');
+      const verifyUrl = `${publicBaseUrl}/auth/verify-email?token=${verifyToken}`;
+      const mailResult = await sendEmailVerificationEmail(newEmail, verifyUrl);
+
+      return {
+        success: true,
+        message: `Verification link sent to ${newEmail}. Please click the link to confirm your new email address.`,
+        previewUrl: mailResult.previewUrl,
+      };
+    }),
+
+  /**
+   * Change Account Password
+   * Requires current password verification and checks that newPassword matches confirmPassword
+   */
+  changePassword: protectedProcedure
+    .input(
+      z.object({
+        currentPassword: z.string().min(1, 'Current password is required'),
+        newPassword: z.string().min(6, 'New password must be at least 6 characters'),
+        confirmPassword: z.string().min(6, 'Please confirm your new password').optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const res = await pgDb.select().from(users).where(eq(users.id, ctx.user.id));
+      if (res.length === 0) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'User account not found',
+        });
+      }
+
+      const currentUser = res[0];
+
+      // Verify current password
+      const isPasswordValid = await bcrypt.compare(input.currentPassword, currentUser.passwordHash);
+      if (!isPasswordValid) {
+        throw new TRPCError({
+          code: 'UNAUTHORIZED',
+          message: 'Current password is incorrect.',
+        });
+      }
+
+      if (input.confirmPassword && input.newPassword !== input.confirmPassword) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'New password and confirmation password do not match.',
+        });
+      }
+
+      // Hash new password
+      const newPasswordHash = await bcrypt.hash(input.newPassword, 10);
+
+      // Update password strictly in PostgreSQL
+      await pgDb
+        .update(users)
+        .set({ passwordHash: newPasswordHash })
+        .where(eq(users.id, ctx.user.id));
+
+      // Revoke any existing refresh tokens
+      await tokenStore.revokeUserTokens(ctx.user.id, 'refreshToken');
+
+      return {
+        success: true,
+        message: 'Your password has been changed successfully.',
+      };
+    }),
 });

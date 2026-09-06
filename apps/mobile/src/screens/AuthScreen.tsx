@@ -6,13 +6,17 @@ import {
   TextInput,
   TouchableOpacity,
   ActivityIndicator,
-  SafeAreaView,
   KeyboardAvoidingView,
   Platform,
+  Modal,
+  Linking,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useForm, Controller } from 'react-hook-form';
+import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '../theme';
 import { apiClient, setApiBaseUrl } from '../utils/apiClient';
+import { showCustomAlert } from '../components/CustomAlert';
 
 interface AuthFormData {
   email: string;
@@ -24,7 +28,7 @@ interface AuthScreenProps {
   onLoginSuccess: (
     accessToken: string,
     refreshToken: string,
-    user: { id: string; email: string; name: string }
+    user: { id: string; email: string; name: string; role?: 'admin' | 'member' }
   ) => void;
   apiBaseUrl: string;
 }
@@ -36,15 +40,19 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
   const [pingStatus, setPingStatus] = useState<string>('Ping API Status');
   const [pingColor, setPingColor] = useState<string>(COLORS.textMuted);
 
+  // Forgot password modal state
+  const [forgotPasswordModalOpen, setForgotPasswordModalOpen] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotSubmitting, setForgotSubmitting] = useState(false);
   const {
     control,
     handleSubmit,
     formState: { errors },
   } = useForm<AuthFormData>({
     defaultValues: {
-      email: 'alex@tubo.dev',
-      password: 'password123',
-      name: 'Alex Vance',
+      email: typeof __DEV__ !== 'undefined' && __DEV__ ? 'alex@tubo.dev' : '',
+      password: typeof __DEV__ !== 'undefined' && __DEV__ ? 'password123' : '',
+      name: typeof __DEV__ !== 'undefined' && __DEV__ ? 'Alex Vance' : '',
     },
   });
 
@@ -70,24 +78,82 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
         throw new Error(data.error?.message || 'Authentication failed');
       }
 
-      const result = data.result?.data;
-      if (result?.user && (result?.accessToken || result?.token)) {
-        const accessToken = result.accessToken || result.token;
-        const refreshToken = result.refreshToken || '';
-        onLoginSuccess(accessToken, refreshToken, result.user);
+      if (data.result && data.result.data) {
+        const payload = data.result.data;
+        const accessToken = payload.accessToken || payload.token;
+        const refreshToken = payload.refreshToken;
+        const userObj = payload.user;
+
+        if (!accessToken) {
+          throw new Error('No access token returned from authentication server');
+        }
+
+        onLoginSuccess(accessToken, refreshToken, userObj);
       } else {
-        throw new Error('Invalid authentication response from API');
+        throw new Error('Unexpected response format from auth service');
       }
     } catch (err: any) {
-      const msg =
-        err.response?.data?.error?.message ||
-        err.message ||
-        `Network request failed to ${apiBaseUrl}. Is the API server running?`;
+      console.error('Auth submit error:', err);
+      const msg = err.response?.data?.error?.message || err.message || 'Authentication failed';
       setErrorMsg(msg);
+      showCustomAlert({
+        title: isLogin ? 'Sign In Failed' : 'Registration Failed',
+        message: msg,
+        type: 'danger',
+      });
     } finally {
       setLoading(false);
     }
   };
+
+  const handleForgotPasswordSubmit = async () => {
+    if (!forgotEmail.trim() || !forgotEmail.includes('@')) {
+      showCustomAlert({
+        title: 'Valid Email Required',
+        message: 'Please enter a valid email address to receive reset instructions.',
+        type: 'warning',
+      });
+      return;
+    }
+
+    setForgotSubmitting(true);
+    try {
+      const response = await apiClient.post(`${apiBaseUrl}/trpc/auth.requestPasswordReset`, {
+        email: forgotEmail.trim().toLowerCase(),
+      });
+
+      const data = response.data?.result?.data;
+      const previewUrl = data?.previewUrl;
+      setForgotPasswordModalOpen(false);
+      const targetEmail = forgotEmail;
+      setForgotEmail('');
+
+      showCustomAlert({
+        title: 'Password Reset Sent',
+        message: `If an account exists for ${targetEmail}, password reset instructions have been dispatched via email.`,
+        type: 'success',
+        buttons: previewUrl
+          ? [
+              { text: 'Close', style: 'cancel' },
+              {
+                text: 'Open Reset Portal',
+                style: 'default',
+                onPress: () => Linking.openURL(previewUrl),
+              },
+            ]
+          : [{ text: 'OK', style: 'default' }],
+      });
+    } catch (err: any) {
+      showCustomAlert({
+        title: 'Reset Error',
+        message: err.message || 'Unable to request password reset.',
+        type: 'danger',
+      });
+    } finally {
+      setForgotSubmitting(false);
+    }
+  };
+
 
   const handlePing = async () => {
     setPingStatus('Pinging...');
@@ -108,7 +174,7 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.content}
@@ -223,17 +289,36 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
             {errors.password && (
               <Text style={styles.fieldErrorText}>{errors.password.message}</Text>
             )}
+
+            {/* Forgot Password Link (Login Mode) */}
+            {isLogin && (
+              <TouchableOpacity
+                style={styles.forgotBtn}
+                onPress={() => {
+                  setForgotEmail(control._formValues?.email || '');
+                  setForgotPasswordModalOpen(true);
+                }}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.forgotBtnText}>Forgot Password?</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
           {/* Submit Button */}
           <TouchableOpacity
-            style={styles.primaryButton}
+            style={[styles.primaryButton, loading && { opacity: 0.75 }]}
             onPress={handleSubmit(onSubmit)}
             disabled={loading}
             activeOpacity={0.8}
           >
             {loading ? (
-              <ActivityIndicator color="#000" />
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <ActivityIndicator color="#000" size="small" style={{ marginRight: 8 }} />
+                <Text style={styles.primaryButtonText}>
+                  {isLogin ? 'Authenticating with Server...' : 'Creating Account...'}
+                </Text>
+              </View>
             ) : (
               <Text style={styles.primaryButtonText}>
                 {isLogin ? 'Sign In' : 'Create Account'}
@@ -264,6 +349,65 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
 
           <Text style={styles.urlIndicator}>Target: {apiBaseUrl}</Text>
         </View>
+
+        {/* Forgot Password Modal */}
+        <Modal
+          visible={forgotPasswordModalOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setForgotPasswordModalOpen(false)}
+        >
+          <KeyboardAvoidingView
+            style={styles.modalOverlay}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          >
+            <View style={styles.modalCard}>
+              <View style={styles.modalHeader}>
+                <View style={styles.modalTitleRow}>
+                  <Ionicons name="key-outline" size={18} color={COLORS.secondary} style={{ marginRight: 8 }} />
+                  <Text style={styles.modalTitle}>Reset Password</Text>
+                </View>
+                <TouchableOpacity
+                  style={styles.modalCloseBtn}
+                  onPress={() => setForgotPasswordModalOpen(false)}
+                >
+                  <Ionicons name="close" size={18} color={COLORS.textSubtle} />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.modalSubtitle}>
+                Enter your account email. We'll generate a secure reset token and send instructions to your inbox.
+              </Text>
+
+              <View style={{ marginBottom: 18 }}>
+                <Text style={styles.label}>Account Email</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="name@company.com"
+                  placeholderTextColor={COLORS.textMuted}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  value={forgotEmail}
+                  onChangeText={setForgotEmail}
+                />
+              </View>
+
+              <TouchableOpacity
+                style={[styles.primaryButton, forgotSubmitting && { opacity: 0.7 }]}
+                onPress={handleForgotPasswordSubmit}
+                disabled={forgotSubmitting}
+                activeOpacity={0.8}
+              >
+                {forgotSubmitting ? (
+                  <ActivityIndicator color="#000" size="small" />
+                ) : (
+                  <Text style={styles.primaryButtonText}>Send Reset Link</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -399,5 +543,59 @@ const styles = StyleSheet.create({
     fontSize: 11,
     textAlign: 'center',
     marginTop: 8,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  modalCard: {
+    backgroundColor: '#121316',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 24,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  modalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: COLORS.text,
+  },
+  modalCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalSubtitle: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 18,
+  },
+  forgotBtn: {
+    alignSelf: 'flex-end',
+    marginTop: 6,
+    paddingVertical: 4,
+  },
+  forgotBtnText: {
+    color: COLORS.secondary,
+    fontSize: 12,
+    fontWeight: '700',
   },
 });

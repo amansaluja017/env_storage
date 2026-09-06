@@ -6,14 +6,13 @@ import { TRPCError } from '@trpc/server';
 export const envRouter = router({
   info: protectedProcedure.query(async () => {
     return {
-      message: 'Team-isolated environment variables in-memory runtime store (No database).',
-      storageEngine: 'In-Memory Runtime Store (No DB)',
+      message: 'Team-isolated environment variables stored in PostgreSQL with mobile SQLite local cache.',
+      storageEngine: 'PostgreSQL Database (Neon / Cloud)',
     };
   }),
 
   /**
-   * List environment variables for a team.
-   * STRICT ACCESS CONTROL: Only members of the target team can see its environment variables!
+   * List environment variables for a team and environment (with optional folder filtering)
    */
   list: protectedProcedure
     .input(
@@ -21,25 +20,28 @@ export const envRouter = router({
         workspaceId: z.string(),
         teamId: z.string(),
         environment: z.enum(['development', 'staging', 'production']),
+        folderId: z.string().nullable().optional(),
       })
     )
     .query(async ({ ctx, input }) => {
-      // 1. Verify user is in this team!
       const isMember = await dataStore.isUserInTeam(input.teamId, ctx.user.id);
       if (!isMember) {
         throw new TRPCError({
           code: 'FORBIDDEN',
-          message: 'Access Denied: You are not a member of this team. Environment variables are restricted to team members.',
+          message: 'Access Denied: You are not a member of this team.',
         });
       }
 
-      // 2. Return variables strictly scoped to this team
-      return await dataStore.getEnvs(input.workspaceId, input.teamId, input.environment);
+      return await dataStore.getEnvs(
+        input.workspaceId,
+        input.teamId,
+        input.environment,
+        input.folderId
+      );
     }),
 
   /**
-   * Upsert an environment variable for a team.
-   * Only members of the team can add/edit environment variables in that team.
+   * Upsert an environment variable in PostgreSQL
    */
   upsert: protectedProcedure
     .input(
@@ -48,6 +50,7 @@ export const envRouter = router({
         workspaceId: z.string(),
         teamId: z.string(),
         environment: z.enum(['development', 'staging', 'production']),
+        folderId: z.string().nullable().optional(),
         key: z.string().min(1, 'Key name cannot be empty'),
         value: z.string(),
         isSecret: z.boolean().default(true),
@@ -55,7 +58,6 @@ export const envRouter = router({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      // 1. Verify user is in this team!
       const isMember = await dataStore.isUserInTeam(input.teamId, ctx.user.id);
       if (!isMember) {
         throw new TRPCError({
@@ -64,22 +66,38 @@ export const envRouter = router({
         });
       }
 
-      // 2. Save variable scoped to this team
-      return await dataStore.upsertEnv({
-        id: input.id,
-        workspaceId: input.workspaceId,
-        teamId: input.teamId,
-        environment: input.environment,
-        key: input.key.toUpperCase().trim(),
-        value: input.value,
-        isSecret: input.isSecret,
-        comment: input.comment,
-        createdBy: ctx.user.name || 'Team Member',
-      });
+      try {
+        return await dataStore.upsertEnv({
+          id: input.id,
+          workspaceId: input.workspaceId,
+          teamId: input.teamId,
+          environment: input.environment,
+          folderId: input.folderId,
+          key: input.key.toUpperCase().trim(),
+          value: input.value,
+          isSecret: input.isSecret,
+          comment: input.comment,
+          createdBy: ctx.user.name || 'Team Member',
+          createdById: ctx.user.id,
+          userId: ctx.user.id,
+          userRole: ctx.user.role,
+        });
+      } catch (err: any) {
+        if (err.message?.includes('Access Denied')) {
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: err.message,
+          });
+        }
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: err.message || 'Failed to save environment variable',
+        });
+      }
     }),
 
   /**
-   * Delete an environment variable for a team.
+   * Delete an environment variable from PostgreSQL (creator or admin only)
    */
   delete: protectedProcedure
     .input(
@@ -97,6 +115,51 @@ export const envRouter = router({
         });
       }
 
-      return await dataStore.deleteEnv(input.id, input.teamId);
+      try {
+        return await dataStore.deleteEnv(input.id, input.teamId, ctx.user.id, ctx.user.role);
+      } catch (err: any) {
+        if (err.message?.includes('Access Denied')) {
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: err.message,
+          });
+        }
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: err.message || 'Failed to delete environment variable',
+        });
+      }
+    }),
+
+  /**
+   * Bulk import raw .env entries into PostgreSQL
+   */
+  bulkImport: protectedProcedure
+    .input(
+      z.object({
+        workspaceId: z.string(),
+        teamId: z.string(),
+        environment: z.enum(['development', 'staging', 'production']),
+        folderId: z.string().nullable().optional(),
+        rawDotEnv: z.string().min(1, 'Raw .env content cannot be empty'),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const isMember = await dataStore.isUserInTeam(input.teamId, ctx.user.id);
+      if (!isMember) {
+        throw new TRPCError({
+          code: 'FORBIDDEN',
+          message: 'Access Denied: You cannot import variables into a team you do not belong to.',
+        });
+      }
+
+      return await dataStore.bulkImportEnvs(
+        input.workspaceId,
+        input.teamId,
+        input.environment,
+        input.folderId,
+        input.rawDotEnv,
+        ctx.user.name || 'Team Member'
+      );
     }),
 });

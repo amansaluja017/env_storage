@@ -2,18 +2,21 @@ import React, { useState, useEffect } from 'react';
 import {
   StyleSheet,
   View,
-  SafeAreaView,
   StatusBar,
   ActivityIndicator,
   Text,
   Alert,
+  AppState,
+  Linking,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { AuthScreen } from './src/screens/AuthScreen';
 import { EnvVaultScreen } from './src/screens/EnvVaultScreen';
 import { TeamScreen } from './src/screens/TeamScreen';
 import { Header } from './src/components/Header';
 import { CreateWorkspaceModal } from './src/components/CreateWorkspaceModal';
 import { CreateTeamModal } from './src/components/CreateTeamModal';
+import { AccountModal } from './src/components/AccountModal';
 import { COLORS } from './src/theme';
 import {
   saveAuthSession,
@@ -27,23 +30,27 @@ import {
   registerAuthCallbacks,
   apiClient,
 } from './src/utils/apiClient';
+import { AlertProvider, showCustomAlert } from './src/components/CustomAlert';
+import { ServerLoadingIndicator } from './src/components/ServerLoadingIndicator';
+import { Skeleton } from './src/components/Skeleton';
 
-const API_BASE_URL =
-  process.env.EXPO_PUBLIC_API_URL &&
-  !process.env.EXPO_PUBLIC_API_URL.includes('localhost')
-    ? process.env.EXPO_PUBLIC_API_URL
-    : 'http://10.220.109.189:4000';
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || '';
+if (!API_BASE_URL) {
+  console.warn('⚠️ EXPO_PUBLIC_API_URL is missing. Please configure it in your .env file.');
+}
 
 interface User {
   id: string;
   email: string;
   name: string;
+  role?: 'admin' | 'member';
 }
 
 interface Workspace {
   id: string;
   name: string;
   slug: string;
+  ownerId?: string;
 }
 
 interface Team {
@@ -51,6 +58,7 @@ interface Team {
   workspaceId: string;
   name: string;
   description?: string;
+  createdBy?: string;
 }
 
 export default function App() {
@@ -69,6 +77,58 @@ export default function App() {
   // Modals
   const [wsModalOpen, setWsModalOpen] = useState(false);
   const [teamModalOpen, setTeamModalOpen] = useState(false);
+  const [accountModalOpen, setAccountModalOpen] = useState(false);
+
+  // Refresh Keys & Data State
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleRefresh = () => {
+    setIsRefreshing(true);
+    setRefreshTrigger(prev => prev + 1);
+    setTimeout(() => {
+      setIsRefreshing(false);
+    }, 700);
+  };
+
+  const handleUserUpdated = async (updatedUser: User) => {
+    setUser(updatedUser);
+    const session = await getAuthSession();
+    if (session) {
+      await saveAuthSession({
+        ...session,
+        user: updatedUser,
+      });
+    }
+  };
+
+  const handleWorkspaceUpdated = (updatedWs: { id: string; name: string; slug: string; ownerId?: string }) => {
+    setWorkspaces(prev => prev.map(w => (w.id === updatedWs.id ? { ...w, ...updatedWs } : w)));
+  };
+
+  const handleWorkspaceDeleted = (deletedWsId: string) => {
+    setWorkspaces(prev => {
+      const next = prev.filter(w => w.id !== deletedWsId);
+      if (activeWorkspaceId === deletedWsId) {
+        setActiveWorkspaceId(next.length > 0 ? next[0].id : '');
+      }
+      return next;
+    });
+  };
+
+  const handleTeamUpdated = (updatedTeam: { id: string; workspaceId?: string; name: string; description?: string; createdBy?: string }) => {
+    setTeams(prev => prev.map(t => (t.id === updatedTeam.id ? { ...t, ...updatedTeam } : t)));
+  };
+
+  const handleTeamDeleted = (deletedTeamId: string) => {
+    setTeams(prev => {
+      const next = prev.filter(t => t.id !== deletedTeamId);
+      if (activeTeamId === deletedTeamId) {
+        setActiveTeamId(next.length > 0 ? next[0].id : '');
+      }
+      return next;
+    });
+  };
 
   const handleLoginSuccess = async (
     newAccessToken: string,
@@ -116,18 +176,19 @@ export default function App() {
       return;
     }
 
-    Alert.alert(
-      'Log Out',
-      'Are you sure you want to log out of Tubo?',
-      [
+    showCustomAlert({
+      title: 'Log Out',
+      message: 'Are you sure you want to log out of Tubo on this device?',
+      type: 'warning',
+      buttons: [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Log Out',
           style: 'destructive',
           onPress: executeLogout,
         },
-      ]
-    );
+      ],
+    });
   };
 
   // 1. Initial Session Restore & Auto-Refresh Setup
@@ -158,15 +219,17 @@ export default function App() {
           setToken(savedSession.accessToken);
           setUser(savedSession.user);
 
-          // Verify session in background
-          try {
-            const res = await apiClient.get(`${API_BASE_URL}/trpc/auth.me`);
-            if (res.data?.result?.data?.user) {
-              setUser(res.data.result.data.user);
-            }
-          } catch (e) {
-            console.log('Background token verification notice:', e);
-          }
+          // Verify session in background asynchronously without blocking session restoration
+          apiClient
+            .get(`${API_BASE_URL}/trpc/auth.me`)
+            .then(res => {
+              if (res.data?.result?.data?.user) {
+                setUser(res.data.result.data.user);
+              }
+            })
+            .catch(e => {
+              console.log('Background token verification notice:', e);
+            });
         }
       } catch (err) {
         console.log('Error restoring auth session:', err);
@@ -177,6 +240,39 @@ export default function App() {
 
     restoreSavedSession();
   }, []);
+
+  // Auto-refresh user profile when returning to the app (e.g. after email verification)
+  useEffect(() => {
+    if (!token) return;
+
+    const handleRefreshUser = () => {
+      apiClient
+        .get(`${API_BASE_URL}/trpc/auth.me`)
+        .then((res) => {
+          if (res.data?.result?.data?.user) {
+            const updated = res.data.result.data.user;
+            setUser(updated);
+            handleUserUpdated(updated);
+          }
+        })
+        .catch(() => {});
+    };
+
+    const stateSub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        handleRefreshUser();
+      }
+    });
+
+    const linkSub = Linking.addEventListener('url', () => {
+      handleRefreshUser();
+    });
+
+    return () => {
+      stateSub.remove();
+      linkSub.remove();
+    };
+  }, [token]);
 
   // 2. Fetch Workspaces on Login / Token Change
   useEffect(() => {
@@ -228,84 +324,117 @@ export default function App() {
     fetchTeams();
   }, [token, activeWorkspaceId]);
 
-  if (isRestoringSession) {
-    return (
-      <View style={styles.splashContainer}>
-        <ActivityIndicator size="large" color={COLORS.primary} />
-        <Text style={styles.splashText}>Restoring Secure Vault...</Text>
-      </View>
-    );
-  }
-
-  if (!token || !user) {
-    return <AuthScreen onLoginSuccess={handleLoginSuccess} apiBaseUrl={API_BASE_URL} />;
-  }
-
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
-
-      {/* App Header */}
-      <Header
-        user={user}
-        workspaces={workspaces}
-        activeWorkspaceId={activeWorkspaceId}
-        onSelectWorkspace={setActiveWorkspaceId}
-        onOpenCreateWorkspace={() => setWsModalOpen(true)}
-        teams={teams}
-        activeTeamId={activeTeamId}
-        onSelectTeam={setActiveTeamId}
-        onOpenCreateTeam={() => setTeamModalOpen(true)}
-        activeTab={activeTab}
-        onSelectTab={setActiveTab}
-        onSignOut={handleSignOut}
-      />
-
-      {/* Main Body Content */}
-      <View style={styles.body}>
-        {activeTab === 'envs' ? (
-          <EnvVaultScreen
-            token={token}
-            workspaceId={activeWorkspaceId}
-            teamId={activeTeamId}
-            apiBaseUrl={API_BASE_URL}
-            user={user}
-          />
+    <SafeAreaProvider>
+      <AlertProvider>
+        <ServerLoadingIndicator />
+        {isRestoringSession ? (
+          <SafeAreaView style={styles.splashContainer} edges={['top', 'left', 'right', 'bottom']}>
+            <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
+            <ActivityIndicator size="large" color={COLORS.primary} />
+            <Text style={styles.splashText}>Restoring Secure Vault...</Text>
+            <View style={{ width: 180, marginTop: 16 }}>
+              <Skeleton width="100%" height={8} borderRadius={4} />
+            </View>
+          </SafeAreaView>
+        ) : !token || !user ? (
+          <AuthScreen onLoginSuccess={handleLoginSuccess} apiBaseUrl={API_BASE_URL} />
         ) : (
-          <TeamScreen
-            token={token}
-            workspaceId={activeWorkspaceId}
-            teamId={activeTeamId}
-            apiBaseUrl={API_BASE_URL}
-          />
+          <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
+            <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
+
+            {/* App Header */}
+            <Header
+              user={user}
+              workspaces={workspaces}
+              activeWorkspaceId={activeWorkspaceId}
+              onSelectWorkspace={setActiveWorkspaceId}
+              onOpenCreateWorkspace={() => setWsModalOpen(true)}
+              onWorkspaceUpdated={handleWorkspaceUpdated}
+              onWorkspaceDeleted={handleWorkspaceDeleted}
+              teams={teams}
+              activeTeamId={activeTeamId}
+              onSelectTeam={setActiveTeamId}
+              onOpenCreateTeam={() => setTeamModalOpen(true)}
+              onTeamUpdated={handleTeamUpdated}
+              onTeamDeleted={handleTeamDeleted}
+              activeTab={activeTab}
+              onSelectTab={setActiveTab}
+              onSignOut={handleSignOut}
+              onOpenAccount={() => setAccountModalOpen(true)}
+              onRefresh={handleRefresh}
+              isRefreshing={isRefreshing}
+              token={token}
+              apiBaseUrl={API_BASE_URL}
+            />
+
+            {/* Main Body Content */}
+            <View style={styles.body}>
+              {activeTab === 'envs' ? (
+                <EnvVaultScreen
+                  token={token}
+                  workspaceId={activeWorkspaceId}
+                  teamId={activeTeamId}
+                  workspace={workspaces.find(w => w.id === activeWorkspaceId)}
+                  team={teams.find(t => t.id === activeTeamId)}
+                  apiBaseUrl={API_BASE_URL}
+                  user={user}
+                  refreshTrigger={refreshTrigger}
+                />
+              ) : (
+                <TeamScreen
+                  token={token}
+                  workspaceId={activeWorkspaceId}
+                  teamId={activeTeamId}
+                  team={teams.find(t => t.id === activeTeamId)}
+                  workspaces={workspaces}
+                  allTeams={teams}
+                  apiBaseUrl={API_BASE_URL}
+                  user={user}
+                  refreshTrigger={refreshTrigger}
+                  onTeamUpdated={handleTeamUpdated}
+                  onTeamDeleted={handleTeamDeleted}
+                />
+              )}
+            </View>
+
+            {/* Workspace Creation Modal */}
+            <CreateWorkspaceModal
+              visible={wsModalOpen}
+              onClose={() => setWsModalOpen(false)}
+              token={token}
+              apiBaseUrl={API_BASE_URL}
+              onCreated={newWs => {
+                setWorkspaces(prev => [...prev, newWs]);
+                setActiveWorkspaceId(newWs.id);
+              }}
+            />
+
+            {/* Team Creation Modal */}
+            <CreateTeamModal
+              visible={teamModalOpen}
+              onClose={() => setTeamModalOpen(false)}
+              workspaceId={activeWorkspaceId}
+              token={token}
+              apiBaseUrl={API_BASE_URL}
+              onCreated={newTeam => {
+                setTeams(prev => [...prev, newTeam]);
+                setActiveTeamId(newTeam.id);
+              }}
+            />
+
+            {/* Account Information, Redeem Code & Security Modal */}
+            <AccountModal
+              visible={accountModalOpen}
+              onClose={() => setAccountModalOpen(false)}
+              user={user}
+              apiBaseUrl={API_BASE_URL}
+              onUserUpdated={handleUserUpdated}
+            />
+          </SafeAreaView>
         )}
-      </View>
-
-      {/* Workspace Creation Modal */}
-      <CreateWorkspaceModal
-        visible={wsModalOpen}
-        onClose={() => setWsModalOpen(false)}
-        token={token}
-        apiBaseUrl={API_BASE_URL}
-        onCreated={newWs => {
-          setWorkspaces(prev => [...prev, newWs]);
-          setActiveWorkspaceId(newWs.id);
-        }}
-      />
-
-      {/* Team Creation Modal */}
-      <CreateTeamModal
-        visible={teamModalOpen}
-        onClose={() => setTeamModalOpen(false)}
-        workspaceId={activeWorkspaceId}
-        token={token}
-        apiBaseUrl={API_BASE_URL}
-        onCreated={newTeam => {
-          setTeams(prev => [...prev, newTeam]);
-          setActiveTeamId(newTeam.id);
-        }}
-      />
-    </SafeAreaView>
+      </AlertProvider>
+    </SafeAreaProvider>
   );
 }
 

@@ -1,20 +1,13 @@
-import { pgDb, tokens, eq, and, gt, isNull, or } from '@tubo/db';
+import crypto from 'node:crypto';
+import { pgDb, tokens, eq, and, gt, isNull, TokenType } from '@tubo/db';
 
-export type TokenType =
-  | 'refreshToken'
-  | 'verificationToken'
-  | 'passwordResetToken'
-  | 'teamInviteToken'
-  | 'refresh'
-  | 'verification'
-  | 'password_reset'
-  | 'team_invite';
+export type { TokenType };
 
 export interface TokenRecord {
   id: string;
   userId: string | null;
   token: string;
-  type: string;
+  type: TokenType;
   expiresAt: Date;
   consumedAt: Date | null;
   metadata?: string | null;
@@ -22,19 +15,15 @@ export interface TokenRecord {
 }
 
 /**
- * Normalizes token type to support both camelCase and snake_case naming
+ * Creates a SHA-256 hash digest of a raw token string for secure persistence and lookup
  */
-function normalizeType(type: string): string[] {
-  if (type === 'refreshToken' || type === 'refresh') return ['refreshToken', 'refresh'];
-  if (type === 'verificationToken' || type === 'verification') return ['verificationToken', 'verification'];
-  if (type === 'passwordResetToken' || type === 'password_reset') return ['passwordResetToken', 'password_reset'];
-  if (type === 'teamInviteToken' || type === 'team_invite') return ['teamInviteToken', 'team_invite'];
-  return [type];
+export function hashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
 }
 
 export const tokenStore = {
   /**
-   * Persist a token record strictly in PostgreSQL database
+   * Persist a token record strictly in PostgreSQL database using SHA-256 hash
    */
   async createToken(params: {
     userId?: string | null;
@@ -43,7 +32,7 @@ export const tokenStore = {
     expiresInMs: number;
     metadata?: Record<string, any> | string | null;
   }): Promise<TokenRecord> {
-    const id = 'tok_' + Math.random().toString(36).substring(2, 11);
+    const id = crypto.randomUUID();
     const now = new Date();
     const expiresAt = new Date(now.getTime() + params.expiresInMs);
     const metadataStr =
@@ -51,10 +40,12 @@ export const tokenStore = {
         ? JSON.stringify(params.metadata)
         : params.metadata || null;
 
+    const hashedToken = hashToken(params.token);
+
     const record: TokenRecord = {
       id,
       userId: params.userId || null,
-      token: params.token,
+      token: params.token, // Raw token preserved in returned in-memory object for delivery
       type: params.type,
       expiresAt,
       consumedAt: null,
@@ -65,8 +56,8 @@ export const tokenStore = {
     await pgDb.insert(tokens).values({
       id: record.id,
       userId: record.userId,
-      token: record.token,
-      type: record.type as any,
+      token: hashedToken, // Stored as SHA-256 hash digest in PostgreSQL
+      type: record.type,
       expiresAt: record.expiresAt,
       consumedAt: null,
       metadata: record.metadata,
@@ -78,13 +69,13 @@ export const tokenStore = {
 
   /**
    * Find a token record strictly in PostgreSQL:
-   * - Matching the token string
+   * - Matching the SHA-256 hashed token string
    * - Matching the token type
    * - Not yet consumed (consumedAt is null)
    * - Not expired (expiresAt > now)
    */
   async findValidToken(tokenString: string, type: TokenType): Promise<TokenRecord | null> {
-    const validTypes = normalizeType(type);
+    const hashed = hashToken(tokenString);
     const now = new Date();
 
     const res = await pgDb
@@ -92,7 +83,8 @@ export const tokenStore = {
       .from(tokens)
       .where(
         and(
-          eq(tokens.token, tokenString),
+          eq(tokens.token, hashed),
+          eq(tokens.type, type),
           isNull(tokens.consumedAt),
           gt(tokens.expiresAt, now)
         )
@@ -100,49 +92,47 @@ export const tokenStore = {
 
     if (res.length > 0) {
       const row = res[0];
-      if (validTypes.includes(row.type)) {
-        return {
-          id: row.id,
-          userId: row.userId,
-          token: row.token,
-          type: row.type,
-          expiresAt: row.expiresAt,
-          consumedAt: row.consumedAt,
-          metadata: row.metadata,
-          createdAt: row.createdAt,
-        };
-      }
+      return {
+        id: row.id,
+        userId: row.userId,
+        token: row.token,
+        type: row.type as TokenType,
+        expiresAt: row.expiresAt,
+        consumedAt: row.consumedAt,
+        metadata: row.metadata,
+        createdAt: row.createdAt,
+      };
     }
 
     return null;
   },
 
   /**
-   * Mark a token as consumed (prevents reuse / replay attack) strictly in PostgreSQL
+   * Atomically mark a token as consumed if not already consumed.
+   * Returns true if a row was updated (token was active and is now consumed),
+   * false if the token was already consumed or non-existent.
    */
-  async consumeToken(tokenIdOrString: string): Promise<boolean> {
+  async consumeToken(tokenString: string): Promise<boolean> {
+    const hashed = hashToken(tokenString);
     const now = new Date();
 
-    await pgDb
+    const result = await pgDb
       .update(tokens)
       .set({ consumedAt: now })
-      .where(or(eq(tokens.token, tokenIdOrString), eq(tokens.id, tokenIdOrString)));
+      .where(and(eq(tokens.token, hashed), isNull(tokens.consumedAt)));
 
-    return true;
+    return (result.rowCount ?? 0) > 0;
   },
 
   /**
    * Revoke all tokens of a specific type for a user strictly in PostgreSQL
    */
   async revokeUserTokens(userId: string, type: TokenType): Promise<void> {
-    const validTypes = normalizeType(type);
     const now = new Date();
 
-    for (const t of validTypes) {
-      await pgDb
-        .update(tokens)
-        .set({ consumedAt: now })
-        .where(and(eq(tokens.userId, userId), eq(tokens.type, t as any), isNull(tokens.consumedAt)));
-    }
+    await pgDb
+      .update(tokens)
+      .set({ consumedAt: now })
+      .where(and(eq(tokens.userId, userId), eq(tokens.type, type), isNull(tokens.consumedAt)));
   },
 };

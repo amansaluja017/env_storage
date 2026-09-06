@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc.js';
 import { dataStore } from '../storage/store.js';
+import { TRPCError } from '@trpc/server';
 
 export const workspaceRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
@@ -24,4 +25,51 @@ export const workspaceRouter = router({
       });
       return newWs;
     }),
+
+  rename: protectedProcedure
+    .input(
+      z.object({
+        workspaceId: z.string(),
+        name: z.string().min(2, 'Workspace name must be at least 2 characters'),
+        slug: z.string().optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      try {
+        const updated = await dataStore.renameWorkspace(
+          input.workspaceId,
+          input.name,
+          input.slug,
+          ctx.user.id
+        );
+        return updated;
+      } catch (err: any) {
+        throw new TRPCError({
+          code: err.message?.includes('Access Denied') ? 'FORBIDDEN' : 'BAD_REQUEST',
+          message: err.message || 'Failed to rename workspace',
+        });
+      }
+    }),
+
+  delete: protectedProcedure
+    .input(
+      z.object({
+        workspaceId: z.string(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      try {
+        await dataStore.deleteWorkspace(input.workspaceId, ctx.user.id);
+        return {
+          success: true,
+          message: 'Workspace deleted successfully',
+        };
+      } catch (err: any) {
+        throw new TRPCError({
+          code: err.message?.includes('Access Denied') ? 'FORBIDDEN' : 'BAD_REQUEST',
+          message: err.message || 'Failed to delete workspace',
+        });
+      }
+    }),
 });
+

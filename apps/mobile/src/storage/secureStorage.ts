@@ -86,11 +86,12 @@ export async function getAuthSession(): Promise<AuthSession | null> {
     } catch (err) {
       console.warn('SecureStore read failed:', err);
     }
-  } else {
-    accessToken = memoryStore[ACCESS_TOKEN_KEY] || null;
-    refreshToken = memoryStore[REFRESH_TOKEN_KEY] || null;
-    userJson = memoryStore[USER_SESSION_KEY] || null;
   }
+
+  // Fall back to memoryStore if values are missing from SecureStore
+  accessToken = accessToken || memoryStore[ACCESS_TOKEN_KEY] || null;
+  refreshToken = refreshToken || memoryStore[REFRESH_TOKEN_KEY] || null;
+  userJson = userJson || memoryStore[USER_SESSION_KEY] || null;
 
   if (!accessToken || !refreshToken || !userJson) {
     return null;

@@ -8,8 +8,8 @@ import {
   ScrollView,
   TextInput,
   ActivityIndicator,
-  SafeAreaView,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { COLORS } from '../theme';
 import {
   getAllMobileEnvsRaw,
@@ -69,11 +69,19 @@ export function SqliteInspectorModal({ visible, onClose }: SqliteInspectorModalP
   }, [visible, activeTable]);
 
   const handleRunQuery = async () => {
-    if (!customQuery.trim()) return;
+    const trimmed = customQuery.trim();
+    if (!trimmed) return;
+
+    const firstWord = trimmed.split(/\s+/)[0]?.toUpperCase();
+    if (firstWord !== 'SELECT' && firstWord !== 'PRAGMA') {
+      setQueryError('Security Restriction: Only SELECT and PRAGMA read-only statements are permitted.');
+      return;
+    }
+
     setLoading(true);
     setQueryError(null);
     try {
-      const result = await executeMobileSqliteQuery(customQuery.trim());
+      const result = await executeMobileSqliteQuery(trimmed);
       setRows(result);
     } catch (e: any) {
       setQueryError(e.message || 'Query execution error');
@@ -84,21 +92,16 @@ export function SqliteInspectorModal({ visible, onClose }: SqliteInspectorModalP
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <SafeAreaView style={styles.modalOverlay}>
+      <SafeAreaView style={styles.modalOverlay} edges={['top', 'left', 'right', 'bottom']}>
         <View style={styles.modalContent}>
           {/* Header */}
           <View style={styles.header}>
             <View>
               <View style={styles.badgeRow}>
                 <Text style={styles.title}>🗄️ SQLite DB Inspector</Text>
-                <View
-                  style={[
-                    styles.modeBadge,
-                    stats.isNative ? styles.modeBadgeNative : styles.modeBadgeFallback,
-                  ]}
-                >
+                <View style={[styles.modeBadge, styles.modeBadgeNative]}>
                   <Text style={styles.modeBadgeText}>
-                    {stats.isNative ? '⚡ NATIVE SQLITE' : 'IN-MEMORY'}
+                    ⚡ PERSISTENT SQLITE
                   </Text>
                 </View>
               </View>
@@ -213,7 +216,18 @@ export function SqliteInspectorModal({ visible, onClose }: SqliteInspectorModalP
             </View>
           ) : activeTab === 'json' ? (
             <ScrollView style={styles.scrollArea}>
-              <Text style={styles.jsonText}>{JSON.stringify(rows, null, 2)}</Text>
+              <Text style={styles.jsonText}>
+                {JSON.stringify(
+                  showSecrets
+                    ? rows
+                    : rows.map(r => {
+                        const isSec = Boolean(r.is_secret ?? r.isSecret);
+                        return isSec && r.value !== undefined ? { ...r, value: '••••••••••••' } : r;
+                      }),
+                  null,
+                  2
+                )}
+              </Text>
             </ScrollView>
           ) : activeTable === 'folders' ? (
             <ScrollView horizontal style={styles.horizontalScroll}>

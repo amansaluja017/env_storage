@@ -7,7 +7,7 @@ import {
 
 let activeAccessToken: string | null = null;
 let activeRefreshToken: string | null = null;
-let activeApiBaseUrl: string = 'http://10.220.109.189:4000';
+let activeApiBaseUrl: string = '';
 let isRefreshing = false;
 let refreshPromise: Promise<string | null> | null = null;
 
@@ -30,10 +30,11 @@ export function registerAuthCallbacks(callbacks: {
 }
 
 export function setApiBaseUrl(url: string) {
-  if (url) {
-    activeApiBaseUrl = url.replace(/\/+$/, '');
-    apiClient.defaults.baseURL = activeApiBaseUrl;
+  if (!url) {
+    throw new Error('API base URL must not be empty');
   }
+  activeApiBaseUrl = url.replace(/\/+$/, '');
+  apiClient.defaults.baseURL = activeApiBaseUrl;
 }
 
 export function setActiveTokens(tokens: { accessToken: string | null; refreshToken?: string | null }) {
@@ -55,31 +56,31 @@ export function getActiveRefreshToken(): string | null {
  * Renew tokens by calling /trpc/auth.refreshToken with the current refresh token.
  * Prevents multiple simultaneous refresh calls by sharing the ongoing promise.
  */
-export async function renewAuthTokens(apiBaseUrl?: string): Promise<string | null> {
+export function renewAuthTokens(apiBaseUrl?: string): Promise<string | null> {
   const targetBaseUrl = apiBaseUrl ? apiBaseUrl.replace(/\/+$/, '') : activeApiBaseUrl;
 
-  if (isRefreshing && refreshPromise) {
+  if (refreshPromise) {
     return refreshPromise;
-  }
-
-  // Load refresh token from state or storage if missing in memory
-  if (!activeRefreshToken) {
-    const saved = await getAuthSession();
-    if (saved?.refreshToken) {
-      activeRefreshToken = saved.refreshToken;
-      activeAccessToken = saved.accessToken;
-    }
-  }
-
-  if (!activeRefreshToken) {
-    if (sessionExpiredCallback) sessionExpiredCallback();
-    return null;
   }
 
   isRefreshing = true;
 
   refreshPromise = (async () => {
     try {
+      // Load refresh token from state or storage if missing in memory
+      if (!activeRefreshToken) {
+        const saved = await getAuthSession();
+        if (saved?.refreshToken) {
+          activeRefreshToken = saved.refreshToken;
+          activeAccessToken = saved.accessToken;
+        }
+      }
+
+      if (!activeRefreshToken) {
+        if (sessionExpiredCallback) sessionExpiredCallback();
+        return null;
+      }
+
       console.log('🔄 Access token expired. Renewing auth tokens from API via Axios...');
       const response = await axios.post(`${targetBaseUrl}/trpc/auth.refreshToken`, {
         refreshToken: activeRefreshToken,
@@ -131,6 +132,29 @@ export async function renewAuthTokens(apiBaseUrl?: string): Promise<string | nul
   return refreshPromise;
 }
 
+type NetworkLoadingListener = (isLoading: boolean, activeRequests: number) => void;
+let activeRequestCount = 0;
+const networkLoadingListeners = new Set<NetworkLoadingListener>();
+
+function notifyNetworkLoading() {
+  const isLoading = activeRequestCount > 0;
+  for (const listener of networkLoadingListeners) {
+    try {
+      listener(isLoading, activeRequestCount);
+    } catch (e) {
+      console.warn('Network loading listener error:', e);
+    }
+  }
+}
+
+export function subscribeNetworkLoading(listener: NetworkLoadingListener): () => void {
+  networkLoadingListeners.add(listener);
+  listener(activeRequestCount > 0, activeRequestCount);
+  return () => {
+    networkLoadingListeners.delete(listener);
+  };
+}
+
 /**
  * Main Axios Instance for App API calls with automatic Bearer token and refresh interceptors
  */
@@ -141,29 +165,43 @@ export const apiClient: AxiosInstance = axios.create({
   },
 });
 
-// 1. Request Interceptor: Attach Access Token
+// 1. Request Interceptor: Attach Access Token & Track Server Request Loading
 apiClient.interceptors.request.use(
   async (config) => {
+    activeRequestCount++;
+    notifyNetworkLoading();
+
     // If token not already attached, attach activeAccessToken
     if (!config.headers.Authorization && activeAccessToken) {
       config.headers.Authorization = `Bearer ${activeAccessToken}`;
     }
     return config;
   },
-  (error) => Promise.reject(error)
+  (error) => {
+    activeRequestCount = Math.max(0, activeRequestCount - 1);
+    notifyNetworkLoading();
+    return Promise.reject(error);
+  }
 );
 
-// 2. Response Interceptor: Handle 401 & Auto-Renew Token
+// 2. Response Interceptor: Handle 401 & Auto-Renew Token & Track Server Request Loading
 apiClient.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    activeRequestCount = Math.max(0, activeRequestCount - 1);
+    notifyNetworkLoading();
+    return response;
+  },
   async (error) => {
+    activeRequestCount = Math.max(0, activeRequestCount - 1);
+    notifyNetworkLoading();
+
     const originalRequest = error.config;
 
     // Check for 401 Unauthorized or TOKEN_EXPIRED error
     const is401 = error.response?.status === 401;
     const isTokenExpired = error.response?.data?.error?.message === 'TOKEN_EXPIRED';
 
-    if ((is401 || isTokenExpired) && !originalRequest._retry) {
+    if (originalRequest && (is401 || isTokenExpired) && !originalRequest._retry) {
       originalRequest._retry = true;
 
       const newAccessToken = await renewAuthTokens(activeApiBaseUrl);
