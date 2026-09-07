@@ -112,14 +112,14 @@ export const tokenStore = {
    * Returns true if a row was updated (token was active and is now consumed),
    * false if the token was already consumed or non-existent.
    */
-  async consumeToken(tokenString: string): Promise<boolean> {
+  async consumeToken(tokenString: string, type: TokenType): Promise<boolean> {
     const hashed = hashToken(tokenString);
     const now = new Date();
 
     const result = await pgDb
       .update(tokens)
       .set({ consumedAt: now })
-      .where(and(eq(tokens.token, hashed), isNull(tokens.consumedAt)));
+      .where(and(eq(tokens.token, hashed), eq(tokens.type, type), isNull(tokens.consumedAt)));
 
     return (result.rowCount ?? 0) > 0;
   },

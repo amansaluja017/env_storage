@@ -141,7 +141,7 @@ export function AlertProvider({ children }: { children: React.ReactNode }) {
     <AlertContext.Provider value={{ showAlert, hideAlert }}>
       {children}
 
-      <Modal visible={visible} transparent animationType="fade">
+      <Modal visible={visible} transparent animationType="fade" onRequestClose={hideAlert}>
         <View style={styles.overlay}>
           <View style={[styles.dialogCard, { borderColor: accent.border }]}>
             {/* Glowing Accent Top Bar */}

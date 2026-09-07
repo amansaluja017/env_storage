@@ -64,6 +64,13 @@
       "when": 1788724223784,
       "tag": "0008_adorable_dagger",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788779139746,
+      "tag": "0009_clever_glorian",
+      "breakpoints": true
     }
   ]
 }

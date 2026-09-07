@@ -1,0 +1,2 @@
+ALTER TABLE "envs" ADD CONSTRAINT "envs_scope_folder_key_unique" UNIQUE NULLS NOT DISTINCT("workspace_id","team_id","environment","folder_id","key");--> statement-breakpoint
+DROP TYPE "public"."user_role";

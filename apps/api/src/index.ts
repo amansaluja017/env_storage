@@ -4,8 +4,9 @@ import express from 'express';
 import cors from 'cors';
 import * as trpcExpress from '@trpc/server/adapters/express';
 import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 import { appRouter } from './router.js';
-import { createContext } from './context.js';
+import { createContext, JWT_SECRET } from './context.js';
 import { tokenStore } from './storage/tokenStore.js';
 import { dataStore } from './storage/store.js';
 import { pgDb, users, eq } from '@tubo/db';
@@ -38,13 +39,13 @@ app.use(
 app.get('/auth/verify-email', async (req, res) => {
   const token = req.query.token as string;
   if (!token) {
-    return res.send(renderEmailVerifiedPage(false, 'Verification token is missing.'));
+    return res.status(400).send(renderEmailVerifiedPage(false, 'Verification token is missing.'));
   }
 
   try {
     const tokenRecord = await tokenStore.findValidToken(token, 'verificationToken');
     if (!tokenRecord || !tokenRecord.userId) {
-      return res.send(
+      return res.status(400).send(
         renderEmailVerifiedPage(
           false,
           'This verification link is invalid, expired, or has already been used.'
@@ -63,7 +64,7 @@ app.get('/auth/verify-email', async (req, res) => {
 
     const newEmail = meta.newEmail;
     if (!newEmail) {
-      return res.send(
+      return res.status(400).send(
         renderEmailVerifiedPage(false, 'Invalid verification metadata. Please try again.')
       );
     }
@@ -71,15 +72,15 @@ app.get('/auth/verify-email', async (req, res) => {
     // Check if new email is already used by another user
     const existing = await pgDb.select().from(users).where(eq(users.email, newEmail));
     if (existing.length > 0 && existing[0].id !== tokenRecord.userId) {
-      return res.send(
+      return res.status(400).send(
         renderEmailVerifiedPage(false, 'This email address is already registered to another account.')
       );
     }
 
     // Atomically consume token
-    const consumed = await tokenStore.consumeToken(token);
+    const consumed = await tokenStore.consumeToken(token, 'verificationToken');
     if (!consumed) {
-      return res.send(
+      return res.status(400).send(
         renderEmailVerifiedPage(false, 'This verification link has already been used.')
       );
     }
@@ -90,7 +91,7 @@ app.get('/auth/verify-email', async (req, res) => {
     return res.send(renderEmailVerifiedPage(true, newEmail));
   } catch (err: any) {
     console.error('Error verifying email:', err);
-    return res.send(
+    return res.status(500).send(
       renderEmailVerifiedPage(false, 'An unexpected server error occurred. Please try again.')
     );
   }
@@ -128,28 +129,29 @@ app.get('/auth/reset-password', async (req, res) => {
 app.post('/auth/reset-password', async (req, res) => {
   const { token, newPassword, confirmPassword } = req.body;
 
-  if (!token) {
-    return res.send(
+  if (!token || typeof token !== 'string' || !token.trim()) {
+    return res.status(400).send(
       renderResetPasswordPortal('', 'Reset token is missing. Please request a new link.')
     );
   }
+  const cleanToken = token.trim();
 
   if (!newPassword || newPassword.length < 6) {
-    return res.send(
-      renderResetPasswordPortal(token, 'New password must be at least 6 characters long.')
+    return res.status(400).send(
+      renderResetPasswordPortal(cleanToken, 'New password must be at least 6 characters long.')
     );
   }
 
   if (newPassword !== confirmPassword) {
-    return res.send(
-      renderResetPasswordPortal(token, 'Passwords do not match. Please verify both fields.')
+    return res.status(400).send(
+      renderResetPasswordPortal(cleanToken, 'Passwords do not match. Please verify both fields.')
     );
   }
 
   try {
-    const tokenRecord = await tokenStore.findValidToken(token, 'passwordResetToken');
+    const tokenRecord = await tokenStore.findValidToken(cleanToken, 'passwordResetToken');
     if (!tokenRecord || !tokenRecord.userId) {
-      return res.send(
+      return res.status(400).send(
         renderResetPasswordPortal(
           '',
           'This password reset token has expired or already been used. Please request a new link.'
@@ -157,9 +159,9 @@ app.post('/auth/reset-password', async (req, res) => {
       );
     }
 
-    const consumed = await tokenStore.consumeToken(token);
+    const consumed = await tokenStore.consumeToken(cleanToken, 'passwordResetToken');
     if (!consumed) {
-      return res.send(
+      return res.status(400).send(
         renderResetPasswordPortal(
           '',
           'This password reset token was already used. Please request a new link.'
@@ -317,6 +319,72 @@ app.post('/auth/accept-invite', async (req, res) => {
   }
 });
 
+// REST Endpoint: Export Environment Variables as ZIP Archive
+app.get('/api/export/envs.zip', async (req, res) => {
+  try {
+    let token = '';
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7);
+    } else if (typeof req.query.token === 'string') {
+      token = req.query.token;
+    }
+
+    if (!token) {
+      return res.status(401).json({ error: 'Unauthorized: Missing token' });
+    }
+
+    let decoded: any;
+    try {
+      decoded = jwt.verify(token, JWT_SECRET);
+    } catch {
+      return res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
+    }
+
+    const { workspaceId, teamId, environment } = req.query;
+    if (!workspaceId || typeof workspaceId !== 'string') {
+      return res.status(400).json({ error: 'Missing required query parameter: workspaceId' });
+    }
+    if (!teamId || typeof teamId !== 'string') {
+      return res.status(400).json({ error: 'Missing required query parameter: teamId' });
+    }
+
+    const isMember = await dataStore.isUserInTeam(teamId, decoded.id);
+    if (!isMember) {
+      return res.status(403).json({ error: 'Access Denied: You do not have access to this team' });
+    }
+
+    const env =
+      typeof environment === 'string' && ['development', 'staging', 'production'].includes(environment)
+        ? (environment as 'development' | 'staging' | 'production')
+        : 'development';
+
+    let folderIds: string[] | undefined;
+    if (req.query.folderIds) {
+      if (Array.isArray(req.query.folderIds)) {
+        folderIds = req.query.folderIds.map(String);
+      } else if (typeof req.query.folderIds === 'string') {
+        folderIds = req.query.folderIds.split(',').map(s => s.trim()).filter(Boolean);
+      }
+    }
+
+    const result = await dataStore.exportEnvsAsZip({
+      workspaceId,
+      teamId,
+      environment: env,
+      folderIds,
+    });
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${result.fileName}"`);
+    res.setHeader('Content-Length', result.buffer.length);
+    return res.send(result.buffer);
+  } catch (err: any) {
+    console.error('Error in /api/export/envs.zip:', err);
+    return res.status(500).json({ error: err.message || 'Failed to export environment variables' });
+  }
+});
+
 // REST Health Check Endpoint
 app.get('/health', (req, res) => {
   res.json({
@@ -328,9 +396,11 @@ app.get('/health', (req, res) => {
 });
 
 // Seed and verify initial accounts & admin role on launch
-seedInitialData().catch(err => {
-  console.error('Error during initial seed verification:', err);
-});
+seedInitialData()
+  .then(() => dataStore.ensureSensitiveEnvsEncrypted())
+  .catch(err => {
+    console.error('Error during initial seed verification:', err);
+  });
 
 app.listen(PORT, () => {
   console.log(`🚀 Tubo Express + tRPC Server running on http://localhost:${PORT}`);

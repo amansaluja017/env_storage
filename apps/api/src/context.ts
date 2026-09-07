@@ -5,6 +5,10 @@ import { pgDb } from '@tubo/db';
 
 const isDev = process.env.NODE_ENV !== 'production';
 
+if (!process.env.JWT_SECRET && !isDev) {
+  throw new Error('FATAL: JWT_SECRET must be configured in non-development environments.');
+}
+
 if (!process.env.JWT_REFRESH_SECRET && !isDev) {
   throw new Error('FATAL: JWT_REFRESH_SECRET must be configured in non-development environments.');
 }

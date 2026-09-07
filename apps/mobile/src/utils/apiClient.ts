@@ -7,7 +7,7 @@ import {
 
 let activeAccessToken: string | null = null;
 let activeRefreshToken: string | null = null;
-let activeApiBaseUrl: string = '';
+let activeApiBaseUrl: string = (process.env.EXPO_PUBLIC_API_URL || '').replace(/\/+$/, '');
 let isRefreshing = false;
 let refreshPromise: Promise<string | null> | null = null;
 
@@ -57,7 +57,7 @@ export function getActiveRefreshToken(): string | null {
  * Prevents multiple simultaneous refresh calls by sharing the ongoing promise.
  */
 export function renewAuthTokens(apiBaseUrl?: string): Promise<string | null> {
-  const targetBaseUrl = apiBaseUrl ? apiBaseUrl.replace(/\/+$/, '') : activeApiBaseUrl;
+  const targetBaseUrl = (apiBaseUrl || activeApiBaseUrl || process.env.EXPO_PUBLIC_API_URL || '').replace(/\/+$/, '');
 
   if (refreshPromise) {
     return refreshPromise;
@@ -121,7 +121,18 @@ export function renewAuthTokens(apiBaseUrl?: string): Promise<string | null> {
 
       return null;
     } catch (err: any) {
-      console.warn('Network error while renewing tokens via Axios:', err?.message || err);
+      const status = err.response?.status;
+      const errorMessage = err.response?.data?.error?.message;
+      console.warn('Network error while renewing tokens via Axios:', errorMessage || err?.message || err);
+
+      // If server rejected the refresh token (401 Unauthorized / 400 Bad Request / 403)
+      if (status === 401 || status === 403 || status === 400 || errorMessage === 'UNAUTHORIZED') {
+        console.warn('❌ Refresh token rejected by server, signing out...');
+        await clearAuthSession();
+        activeAccessToken = null;
+        activeRefreshToken = null;
+        if (sessionExpiredCallback) sessionExpiredCallback();
+      }
       return null;
     } finally {
       isRefreshing = false;
@@ -159,6 +170,7 @@ export function subscribeNetworkLoading(listener: NetworkLoadingListener): () =>
  * Main Axios Instance for App API calls with automatic Bearer token and refresh interceptors
  */
 export const apiClient: AxiosInstance = axios.create({
+  baseURL: activeApiBaseUrl || undefined,
   timeout: 15000,
   headers: {
     'Content-Type': 'application/json',

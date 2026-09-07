@@ -9,8 +9,10 @@ import {
   Animated,
   TextInput,
   ActivityIndicator,
+  Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useTourTarget } from 'guideway';
 import { COLORS } from '../theme';
 import { showCustomAlert } from './CustomAlert';
 import { apiClient } from '../utils/apiClient';
@@ -41,6 +43,7 @@ interface HeaderProps {
 
   onRefresh?: () => void;
   isRefreshing?: boolean;
+  onStartTour?: () => void;
 }
 
 export function Header({
@@ -65,7 +68,14 @@ export function Header({
   apiBaseUrl = '',
   onRefresh,
   isRefreshing = false,
+  onStartTour,
 }: HeaderProps) {
+  const brandTargetRef = useTourTarget('tour-brand');
+  const contextTargetRef = useTourTarget('tour-workspaces-teams');
+  const tabsTargetRef = useTourTarget('tour-tabs');
+  const avatarTargetRef = useTourTarget('tour-user-avatar');
+  const startTourBtnTargetRef = useTourTarget('tour-start-tour-btn');
+
   const [workspaceModalOpen, setWorkspaceModalOpen] = useState(false);
   const [teamModalOpen, setTeamModalOpen] = useState(false);
 
@@ -327,11 +337,13 @@ export function Header({
     <View style={styles.container}>
       {/* Row 1: Brand Wordmark, Live Status & Quick Actions */}
       <View style={styles.topRow}>
-        <View style={styles.brandRow}>
-          <View style={styles.brandIconBox}>
-            <Ionicons name="shield-checkmark" size={15} color={COLORS.primary} />
-          </View>
-          <Text style={styles.brandText}>TUBO</Text>
+        <View ref={brandTargetRef} style={styles.brandRow}>
+          <Image
+            source={require('../../assets/icon.png')}
+            style={styles.brandLogoImg}
+            resizeMode="contain"
+          />
+          <Text style={styles.brandText}>ENV VAULT</Text>
           <View style={styles.statusPill}>
             <View style={styles.statusDot} />
             <Text style={styles.statusPillText}>VAULT</Text>
@@ -339,8 +351,21 @@ export function Header({
         </View>
 
         <View style={styles.actionRow}>
+          {/* Start Tour Action Button */}
+          <TouchableOpacity
+            ref={startTourBtnTargetRef}
+            style={styles.tourBtn}
+            onPress={onStartTour}
+            activeOpacity={0.75}
+            accessibilityLabel="Start tour"
+          >
+            <Ionicons name="compass" size={15} color={COLORS.primary} />
+            <Text style={styles.tourBtnText}>Tour</Text>
+          </TouchableOpacity>
+
           {/* User Profile Avatar */}
           <TouchableOpacity
+            ref={avatarTargetRef}
             style={styles.avatarBtn}
             onPress={handleProfilePress}
             activeOpacity={0.75}
@@ -364,7 +389,7 @@ export function Header({
       </View>
 
       {/* Row 2: Dedicated Workspace & Team Hierarchy Selector Card */}
-      <View style={styles.contextContainer}>
+      <View ref={contextTargetRef} style={styles.contextContainer}>
         {/* Workspace Selector Half */}
         <TouchableOpacity
           style={styles.contextCard}
@@ -408,7 +433,7 @@ export function Header({
       </View>
 
       {/* Row 3: Sleek Segmented Tab Switcher */}
-      <View style={styles.segmentedContainer}>
+      <View ref={tabsTargetRef} style={styles.segmentedContainer}>
         <TouchableOpacity
           style={[styles.segmentBtn, activeTab === 'envs' && styles.segmentBtnActive]}
           onPress={() => onSelectTab('envs')}
@@ -916,6 +941,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginRight: 8,
   },
+  brandLogoImg: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    marginRight: 8,
+  },
   brandText: {
     color: COLORS.text,
     fontSize: 16,
@@ -952,6 +983,23 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  tourBtn: {
+    height: 34,
+    paddingHorizontal: 9,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0, 229, 153, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 229, 153, 0.35)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  tourBtnText: {
+    color: COLORS.primary,
+    fontSize: 12,
+    fontWeight: '700',
   },
   iconBtn: {
     width: 34,

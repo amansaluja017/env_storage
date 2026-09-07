@@ -10,6 +10,7 @@ import {
   Platform,
   Modal,
   Linking,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useForm, Controller } from 'react-hook-form';
@@ -181,12 +182,14 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
       >
         {/* Brand Header */}
         <View style={styles.brandContainer}>
-          <View style={styles.logoBadge}>
-            <Text style={styles.logoText}>⚡</Text>
-          </View>
-          <Text style={styles.title}>TUBO</Text>
+          <Image
+            source={require('../../assets/icon.png')}
+            style={styles.logoImage}
+            resizeMode="contain"
+          />
+          <Text style={styles.title}>ENV VAULT</Text>
           <Text style={styles.subtitle}>
-            Secure Monorepo Environment Vault & Team Workspace
+            Secure Environment Variable Vault & Team Workspace
           </Text>
         </View>
 
@@ -426,6 +429,16 @@ const styles = StyleSheet.create({
   brandContainer: {
     alignItems: 'center',
     marginBottom: 32,
+  },
+  logoImage: {
+    width: 68,
+    height: 68,
+    borderRadius: 18,
+    marginBottom: 12,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
   },
   logoBadge: {
     width: 60,

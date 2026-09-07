@@ -259,8 +259,9 @@ function ensureDatabase(dbPath) {
       name TEXT NOT NULL,
       description TEXT,
       created_by TEXT NOT NULL DEFAULT 'Unknown',
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      created_by_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
     CREATE TABLE IF NOT EXISTS envs (
@@ -274,13 +275,20 @@ function ensureDatabase(dbPath) {
       is_secret INTEGER NOT NULL DEFAULT 1,
       comment TEXT,
       created_by TEXT NOT NULL DEFAULT 'Unknown',
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      created_by_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
 
   try {
     db.exec(`ALTER TABLE envs ADD COLUMN folder_id TEXT;`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE folders ADD COLUMN created_by_id TEXT;`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE envs ADD COLUMN created_by_id TEXT;`);
   } catch {}
 
   return db;

@@ -1,5 +1,4 @@
 import * as SecureStore from 'expo-secure-store';
-import Constants, { ExecutionEnvironment } from 'expo-constants';
 import { Platform } from 'react-native';
 
 const ACCESS_TOKEN_KEY = 'tubo_auth_access_token';
@@ -18,29 +17,52 @@ export interface AuthSession {
   user: UserInfo;
 }
 
-// In-memory store fallback when running in Expo Go or Web environments
+// In-memory store fallback when running in Web environments or when storage is restricted
 const memoryStore: Record<string, string> = {};
 
 /**
- * Checks if the app is running inside Expo Go
+ * Web / fallback storage helpers
  */
-export function isExpoGo(): boolean {
-  if (Platform.OS === 'web') return false;
-  return (
-    Constants.appOwnership === 'expo' ||
-    Constants.executionEnvironment === ExecutionEnvironment.StoreClient ||
-    (Constants.executionEnvironment as string) === 'storeClient'
-  );
+function getWebOrMemoryItem(key: string): string | null {
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      // localStorage restricted
+    }
+  }
+  return memoryStore[key] ?? null;
+}
+
+function setWebOrMemoryItem(key: string, value: string): void {
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.setItem(key, value);
+      return;
+    } catch {
+      // localStorage restricted
+    }
+  }
+  memoryStore[key] = value;
+}
+
+function removeWebOrMemoryItem(key: string): void {
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && window.localStorage) {
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // localStorage restricted
+    }
+  }
+  delete memoryStore[key];
 }
 
 /**
- * Determines whether SecureStore should be utilized:
- * Per user instruction: "if app running on expo go don't store in the secure storage"
+ * Determines whether native SecureStore should be utilized:
+ * Always enabled on native mobile (iOS Keychain & Android Keystore),
+ * falls back to localStorage/memory only on Web.
  */
 export function shouldUseSecureStore(): boolean {
-  if (isExpoGo()) {
-    return false;
-  }
   if (Platform.OS === 'web') {
     return false;
   }
@@ -48,7 +70,8 @@ export function shouldUseSecureStore(): boolean {
 }
 
 /**
- * Persist authentication session
+ * Persist authentication session (access token, refresh token, and user profile)
+ * securely using native hardware-backed encryption.
  */
 export async function saveAuthSession(session: AuthSession): Promise<void> {
   const userJson = JSON.stringify(session.user);
@@ -60,18 +83,18 @@ export async function saveAuthSession(session: AuthSession): Promise<void> {
       await SecureStore.setItemAsync(USER_SESSION_KEY, userJson);
       return;
     } catch (err) {
-      console.warn('SecureStore save failed, using memory fallback:', err);
+      console.warn('SecureStore save failed, using fallback:', err);
     }
   }
 
-  // Fallback for Expo Go and Web
-  memoryStore[ACCESS_TOKEN_KEY] = session.accessToken;
-  memoryStore[REFRESH_TOKEN_KEY] = session.refreshToken;
-  memoryStore[USER_SESSION_KEY] = userJson;
+  // Fallback for Web / restricted environments
+  setWebOrMemoryItem(ACCESS_TOKEN_KEY, session.accessToken);
+  setWebOrMemoryItem(REFRESH_TOKEN_KEY, session.refreshToken);
+  setWebOrMemoryItem(USER_SESSION_KEY, userJson);
 }
 
 /**
- * Retrieve saved authentication session
+ * Retrieve saved authentication session from native secure storage
  */
 export async function getAuthSession(): Promise<AuthSession | null> {
   let accessToken: string | null = null;
@@ -88,10 +111,10 @@ export async function getAuthSession(): Promise<AuthSession | null> {
     }
   }
 
-  // Fall back to memoryStore if values are missing from SecureStore
-  accessToken = accessToken || memoryStore[ACCESS_TOKEN_KEY] || null;
-  refreshToken = refreshToken || memoryStore[REFRESH_TOKEN_KEY] || null;
-  userJson = userJson || memoryStore[USER_SESSION_KEY] || null;
+  // Fall back to web/memory store if missing from SecureStore
+  accessToken = accessToken || getWebOrMemoryItem(ACCESS_TOKEN_KEY);
+  refreshToken = refreshToken || getWebOrMemoryItem(REFRESH_TOKEN_KEY);
+  userJson = userJson || getWebOrMemoryItem(USER_SESSION_KEY);
 
   if (!accessToken || !refreshToken || !userJson) {
     return null;
@@ -106,7 +129,54 @@ export async function getAuthSession(): Promise<AuthSession | null> {
 }
 
 /**
- * Update access token (and optionally refresh token) after token renewal
+ * Save access token and refresh token directly to secure storage
+ */
+export async function saveTokens(accessToken: string, refreshToken: string): Promise<void> {
+  if (shouldUseSecureStore()) {
+    try {
+      await SecureStore.setItemAsync(ACCESS_TOKEN_KEY, accessToken);
+      await SecureStore.setItemAsync(REFRESH_TOKEN_KEY, refreshToken);
+      return;
+    } catch (err) {
+      console.warn('SecureStore saveTokens failed:', err);
+    }
+  }
+  setWebOrMemoryItem(ACCESS_TOKEN_KEY, accessToken);
+  setWebOrMemoryItem(REFRESH_TOKEN_KEY, refreshToken);
+}
+
+/**
+ * Retrieve access token from secure storage
+ */
+export async function getStoredAccessToken(): Promise<string | null> {
+  if (shouldUseSecureStore()) {
+    try {
+      const val = await SecureStore.getItemAsync(ACCESS_TOKEN_KEY);
+      if (val) return val;
+    } catch (err) {
+      console.warn('SecureStore getStoredAccessToken failed:', err);
+    }
+  }
+  return getWebOrMemoryItem(ACCESS_TOKEN_KEY);
+}
+
+/**
+ * Retrieve refresh token from secure storage
+ */
+export async function getStoredRefreshToken(): Promise<string | null> {
+  if (shouldUseSecureStore()) {
+    try {
+      const val = await SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
+      if (val) return val;
+    } catch (err) {
+      console.warn('SecureStore getStoredRefreshToken failed:', err);
+    }
+  }
+  return getWebOrMemoryItem(REFRESH_TOKEN_KEY);
+}
+
+/**
+ * Update access token (and optionally refresh token) after token renewal in secure storage
  */
 export async function updateAccessToken(newAccessToken: string, newRefreshToken?: string): Promise<void> {
   if (shouldUseSecureStore()) {
@@ -121,14 +191,14 @@ export async function updateAccessToken(newAccessToken: string, newRefreshToken?
     }
   }
 
-  memoryStore[ACCESS_TOKEN_KEY] = newAccessToken;
+  setWebOrMemoryItem(ACCESS_TOKEN_KEY, newAccessToken);
   if (newRefreshToken) {
-    memoryStore[REFRESH_TOKEN_KEY] = newRefreshToken;
+    setWebOrMemoryItem(REFRESH_TOKEN_KEY, newRefreshToken);
   }
 }
 
 /**
- * Clear stored authentication session on sign out
+ * Clear stored authentication session on sign out from secure storage
  */
 export async function clearAuthSession(): Promise<void> {
   if (shouldUseSecureStore()) {
@@ -141,7 +211,7 @@ export async function clearAuthSession(): Promise<void> {
     }
   }
 
-  delete memoryStore[ACCESS_TOKEN_KEY];
-  delete memoryStore[REFRESH_TOKEN_KEY];
-  delete memoryStore[USER_SESSION_KEY];
+  removeWebOrMemoryItem(ACCESS_TOKEN_KEY);
+  removeWebOrMemoryItem(REFRESH_TOKEN_KEY);
+  removeWebOrMemoryItem(USER_SESSION_KEY);
 }

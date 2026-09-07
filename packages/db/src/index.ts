@@ -30,6 +30,12 @@ const isRemote =
   pgConnectionString.includes('aws.') ||
   pgConnectionString.includes('sslmode=require');
 
+const sslConfig = isRemote
+  ? process.env.DB_CA_CERT
+    ? { ca: process.env.DB_CA_CERT, rejectUnauthorized: true }
+    : true
+  : undefined;
+
 const poolConfig: PoolConfig = {
   connectionString: pgConnectionString,
   // Generous 30s timeout to allow serverless Postgres (Neon) to cold start without timing out
@@ -37,7 +43,7 @@ const poolConfig: PoolConfig = {
   idleTimeoutMillis: 30000,
   keepAlive: true,
   max: 20,
-  ...(isRemote ? { ssl: { rejectUnauthorized: false } } : {}),
+  ...(sslConfig ? { ssl: sslConfig } : {}),
 };
 
 export const pgPool = new Pool(poolConfig);

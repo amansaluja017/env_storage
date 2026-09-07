@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc.js';
 import { dataStore } from '../storage/store.js';
 import { TRPCError } from '@trpc/server';
+import { pgDb, folders, eq } from '@tubo/db';
 
 export const folderRouter = router({
   /**
@@ -48,6 +49,35 @@ export const folderRouter = router({
           code: 'FORBIDDEN',
           message: 'Access Denied: You cannot create folders in a team you do not belong to.',
         });
+      }
+
+      if (input.id) {
+        const existing = await pgDb
+          .select()
+          .from(folders)
+          .where(eq(folders.id, input.id));
+        if (existing.length > 0) {
+          const f = existing[0];
+          if (f.teamId !== input.teamId || f.workspaceId !== input.workspaceId) {
+            throw new TRPCError({
+              code: 'FORBIDDEN',
+              message: 'Access Denied: Folder ID belongs to a different team or workspace.',
+            });
+          }
+          const canModify = await dataStore.canUserModifyResource(
+            input.teamId,
+            ctx.user.id,
+            ctx.user.role,
+            f.createdById,
+            f.createdBy
+          );
+          if (!canModify) {
+            throw new TRPCError({
+              code: 'FORBIDDEN',
+              message: 'Access Denied: Only the creator of this folder or an admin can modify it.',
+            });
+          }
+        }
       }
 
       return await dataStore.createFolder({

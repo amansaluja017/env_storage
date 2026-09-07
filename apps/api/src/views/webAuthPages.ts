@@ -2,7 +2,18 @@
  * HTML Templates for Web Verification and Password Reset Portal
  */
 
+export function escapeHtml(str: string | null | undefined): string {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export function renderEmailVerifiedPage(success: boolean, emailOrError: string): string {
+  const safeEmailOrError = escapeHtml(emailOrError);
   return `
     <!DOCTYPE html>
     <html lang="en">
@@ -90,8 +101,8 @@ export function renderEmailVerifiedPage(success: boolean, emailOrError: string):
           <p>
             ${
               success
-                ? `Your account email address has been successfully updated to <span class="highlight">${emailOrError}</span>. You can now return to the Tubo app.`
-                : emailOrError || 'This verification link is invalid, expired, or has already been consumed.'
+                ? `Your account email address has been successfully updated to <span class="highlight">${safeEmailOrError}</span>. You can now return to the Tubo app.`
+                : safeEmailOrError || 'This verification link is invalid, expired, or has already been consumed.'
             }
           </p>
           <a href="tubo://" class="btn">Return to Tubo App</a>
@@ -105,6 +116,8 @@ export function renderEmailVerifiedPage(success: boolean, emailOrError: string):
 }
 
 export function renderResetPasswordPortal(token: string, error?: string): string {
+  const safeToken = escapeHtml(token);
+  const safeError = error ? escapeHtml(error) : '';
   return `
     <!DOCTYPE html>
     <html lang="en">
@@ -236,10 +249,10 @@ export function renderResetPasswordPortal(token: string, error?: string): string
           <h1>Set New Password</h1>
           <p class="subtitle">Choose a secure password with at least 6 characters.</p>
 
-          ${error ? `<div class="error-banner">${error}</div>` : ''}
+          ${safeError ? `<div class="error-banner">${safeError}</div>` : ''}
 
           <form method="POST" action="/auth/reset-password">
-            <input type="hidden" name="token" value="${token}" />
+            <input type="hidden" name="token" value="${safeToken}" />
 
             <div class="form-group">
               <label for="newPassword">New Password</label>
@@ -384,14 +397,18 @@ export function renderAcceptInviteSetupPasswordPage(params: {
   workspaceName: string;
   error?: string;
 }): string {
-  const { token, email, teamName, workspaceName, error } = params;
+  const safeToken = escapeHtml(params.token);
+  const safeEmail = escapeHtml(params.email);
+  const safeTeamName = escapeHtml(params.teamName);
+  const safeWorkspaceName = escapeHtml(params.workspaceName);
+  const safeError = params.error ? escapeHtml(params.error) : '';
   return `
     <!DOCTYPE html>
     <html lang="en">
       <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Join ${teamName} - Tubo Vault</title>
+        <title>Join ${safeTeamName} - Tubo Vault</title>
         <style>
           * { box-sizing: border-box; }
           body {
@@ -541,15 +558,15 @@ export function renderAcceptInviteSetupPasswordPage(params: {
           </div>
 
           <div class="team-box team-pill">
-            <div class="team-title">📁 ${teamName}</div>
-            <div class="team-meta">🏢 Workspace: ${workspaceName}</div>
-            <div class="user-email-badge">Invited: ${email}</div>
+            <div class="team-title">📁 ${safeTeamName}</div>
+            <div class="team-meta">🏢 Workspace: ${safeWorkspaceName}</div>
+            <div class="user-email-badge">Invited: ${safeEmail}</div>
           </div>
 
-          ${error ? `<div class="error-box">${error}</div>` : ''}
+          ${safeError ? `<div class="error-box">${safeError}</div>` : ''}
 
           <form method="POST" action="/auth/accept-invite">
-            <input type="hidden" name="token" value="${token}" />
+            <input type="hidden" name="token" value="${safeToken}" />
             <div class="form-group">
               <label for="name">Your Full Name</label>
               <input type="text" id="name" name="name" placeholder="e.g. Sarah Connor" required />
@@ -578,14 +595,17 @@ export function renderInviteSuccessPage(params: {
   workspaceName: string;
   alreadyExisted: boolean;
 }): string {
-  const { email, teamName, workspaceName, alreadyExisted } = params;
+  const safeEmail = escapeHtml(params.email);
+  const safeTeamName = escapeHtml(params.teamName);
+  const safeWorkspaceName = escapeHtml(params.workspaceName);
+  const { alreadyExisted } = params;
   return `
     <!DOCTYPE html>
     <html lang="en">
       <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Welcome to ${teamName}! - Tubo Vault</title>
+        <title>Welcome to ${safeTeamName}! - Tubo Vault</title>
         <style>
           * { box-sizing: border-box; }
           body {
@@ -699,12 +719,12 @@ export function renderInviteSuccessPage(params: {
           <h1>You're In!</h1>
           <p>
             ${alreadyExisted 
-              ? `Your account (<span class="highlight">${email}</span>) has been added to the team.` 
+              ? `Your account (<span class="highlight">${safeEmail}</span>) has been added to the team.` 
               : `Your account has been created and enrolled in the team.`}
           </p>
           <div class="team-box">
-            <div class="team-name">📁 ${teamName}</div>
-            <div class="ws-name">🏢 Workspace: ${workspaceName}</div>
+            <div class="team-name">📁 ${safeTeamName}</div>
+            <div class="ws-name">🏢 Workspace: ${safeWorkspaceName}</div>
           </div>
           <a href="tubo://team" class="btn">Open in Tubo Vault App</a>
           <div class="countdown">Opening Tubo Vault in <span id="count">3</span>s...</div>

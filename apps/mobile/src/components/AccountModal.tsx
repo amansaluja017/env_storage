@@ -32,6 +32,7 @@ interface AccountModalProps {
   user: UserInfo;
   apiBaseUrl: string;
   onUserUpdated: (updatedUser: UserInfo) => void;
+  onReplayTour?: () => void;
 }
 
 interface ChangeEmailFormData {
@@ -62,6 +63,7 @@ export function AccountModal({
   user,
   apiBaseUrl,
   onUserUpdated,
+  onReplayTour,
 }: AccountModalProps) {
   const [activeTab, setActiveTab] = useState<'account' | 'email' | 'password'>('account');
 
@@ -344,6 +346,31 @@ export function AccountModal({
                     </Text>
                   </View>
                 </View>
+
+                {/* On-demand Product Tour Button */}
+                {onReplayTour && (
+                  <TouchableOpacity
+                    style={styles.tourLauncherCard}
+                    onPress={() => {
+                      onClose();
+                      setTimeout(() => {
+                        onReplayTour();
+                      }, 350);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <View style={styles.tourLauncherLeft}>
+                      <View style={styles.tourLauncherIconBox}>
+                        <Ionicons name="compass" size={18} color={COLORS.primary} />
+                      </View>
+                      <View>
+                        <Text style={styles.tourLauncherTitle}>Start Guided Tour</Text>
+                        <Text style={styles.tourLauncherSub}>Learn how to use Env Vault & Teams</Text>
+                      </View>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                )}
 
                 {/* Team Invites List (if any) */}
                 {pendingInvites.length > 0 && (
@@ -835,6 +862,41 @@ const styles = StyleSheet.create({
     padding: 14,
     borderWidth: 1,
     borderColor: COLORS.border,
+    marginBottom: 14,
+  },
+  tourLauncherCard: {
+    backgroundColor: 'rgba(0, 229, 153, 0.08)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 229, 153, 0.25)',
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  tourLauncherLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  tourLauncherIconBox: {
+    width: 34,
+    height: 34,
+    borderRadius: 8,
+    backgroundColor: 'rgba(0, 229, 153, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
+  },
+  tourLauncherTitle: {
+    color: COLORS.text,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  tourLauncherSub: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    marginTop: 2,
   },
   detailRow: {
     flexDirection: 'row',

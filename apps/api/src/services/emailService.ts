@@ -1,7 +1,32 @@
 import nodemailer, { type Transporter } from 'nodemailer';
+import { escapeHtml } from '../views/webAuthPages.js';
 
 const GMAIL_USER = process.env.GMAIL_USER || '';
 const GMAIL_PASS = process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASS || '';
+
+const allowRawPreviews = process.env.ALLOW_INSECURE_PREVIEWS === 'true';
+
+function redactEmail(email: string): string {
+  const [user, domain] = email.split('@');
+  if (!domain) return '***';
+  const maskedUser = user.length <= 2 ? `${user[0] || ''}***` : `${user.slice(0, 2)}***`;
+  return `${maskedUser}@${domain}`;
+}
+
+function redactUrlToken(urlStr: string): string {
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.searchParams.has('token')) {
+      const token = parsed.searchParams.get('token') || '';
+      const prefix = token.slice(0, 8);
+      parsed.searchParams.set('token', `${prefix}...[REDACTED]`);
+      return parsed.toString();
+    }
+  } catch {
+    // fallback
+  }
+  return urlStr.replace(/(token=)([^&]+)/, '$1[REDACTED]');
+}
 
 let transporter: Transporter | null = null;
 
@@ -80,14 +105,18 @@ export async function sendEmailVerificationEmail(
       return { success: true };
     } catch (err: any) {
       console.error('❌ Failed to send email verification via Gmail:', err?.message || err);
+      return { success: false };
     }
   }
 
-  // Console fallback for testing & local development
+  // Console fallback for testing & local development (when no transport is configured)
+  const displayEmail = allowRawPreviews ? toEmail : redactEmail(toEmail);
+  const displayUrl = allowRawPreviews ? verifyUrl : redactUrlToken(verifyUrl);
+
   console.log('\n================== [EMAIL VERIFICATION PREVIEW] ==================');
-  console.log(`To: ${toEmail}`);
+  console.log(`To: ${displayEmail}`);
   console.log(`Subject: ${subject}`);
-  console.log(`Verification URL: ${verifyUrl}`);
+  console.log(`Verification URL: ${displayUrl}`);
   console.log('===================================================================\n');
 
   return { success: true, previewUrl: verifyUrl };
@@ -153,14 +182,18 @@ export async function sendPasswordResetEmail(
       return { success: true };
     } catch (err: any) {
       console.error('❌ Failed to send password reset via Gmail:', err?.message || err);
+      return { success: false };
     }
   }
 
-  // Console fallback for testing & local development
+  // Console fallback for testing & local development (when no transport is configured)
+  const displayEmail = allowRawPreviews ? toEmail : redactEmail(toEmail);
+  const displayUrl = allowRawPreviews ? resetUrl : redactUrlToken(resetUrl);
+
   console.log('\n=================== [PASSWORD RESET PREVIEW] ===================');
-  console.log(`To: ${toEmail}`);
+  console.log(`To: ${displayEmail}`);
   console.log(`Subject: ${subject}`);
-  console.log(`Reset Portal URL: ${resetUrl}`);
+  console.log(`Reset Portal URL: ${displayUrl}`);
   console.log('=================================================================\n');
 
   return { success: true, previewUrl: resetUrl };
@@ -176,7 +209,11 @@ export async function sendTeamInvitationEmail(
   workspaceName: string,
   inviterName?: string
 ): Promise<{ success: boolean; previewUrl?: string }> {
-  const subject = `${inviterName ? `${inviterName} invited you` : "You've been invited"} to join ${teamName} on Tubo Vault`;
+  const safeTeamName = escapeHtml(teamName);
+  const safeWorkspaceName = escapeHtml(workspaceName);
+  const safeInviterName = inviterName ? escapeHtml(inviterName) : undefined;
+
+  const subject = `${safeInviterName ? `${safeInviterName} invited you` : "You've been invited"} to join ${safeTeamName} on Tubo Vault`;
   const htmlContent = `
     <!DOCTYPE html>
     <html>
@@ -200,13 +237,13 @@ export async function sendTeamInvitationEmail(
       <body>
         <div class="container">
           <div class="badge">TUBO VAULT • TEAM INVITATION</div>
-          <h1>Join ${teamName}</h1>
+          <h1>Join ${safeTeamName}</h1>
           <p>
-            ${inviterName ? `<strong>${inviterName}</strong> has` : 'You have been'} invited to collaborate on secrets and environment variables in Tubo Vault.
+            ${safeInviterName ? `<strong>${safeInviterName}</strong> has` : 'You have been'} invited to collaborate on secrets and environment variables in Tubo Vault.
           </p>
           <div class="team-box">
-            <div class="team-name">📁 ${teamName}</div>
-            <div class="ws-name">🏢 Workspace: ${workspaceName}</div>
+            <div class="team-name">📁 ${safeTeamName}</div>
+            <div class="ws-name">🏢 Workspace: ${safeWorkspaceName}</div>
           </div>
           <div style="text-align: center; margin: 30px 0;">
             <a href="${inviteUrl}" class="btn" target="_blank">Accept Invitation</a>
@@ -237,15 +274,19 @@ export async function sendTeamInvitationEmail(
       return { success: true };
     } catch (err: any) {
       console.error('❌ Failed to send team invitation via Gmail:', err?.message || err);
+      return { success: false };
     }
   }
 
-  // Console fallback for local development
+  // Console fallback for local development (when no transport is configured)
+  const displayEmail = allowRawPreviews ? toEmail : redactEmail(toEmail);
+  const displayUrl = allowRawPreviews ? inviteUrl : redactUrlToken(inviteUrl);
+
   console.log('\n=================== [TEAM INVITATION PREVIEW] ===================');
-  console.log(`To: ${toEmail}`);
+  console.log(`To: ${displayEmail}`);
   console.log(`Subject: ${subject}`);
-  console.log(`Team: ${teamName} | Workspace: ${workspaceName}`);
-  console.log(`Invite URL: ${inviteUrl}`);
+  console.log(`Team: ${safeTeamName} | Workspace: ${safeWorkspaceName}`);
+  console.log(`Invite URL: ${displayUrl}`);
   console.log('=================================================================\n');
 
   return { success: true, previewUrl: inviteUrl };

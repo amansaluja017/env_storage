@@ -8,8 +8,19 @@ import {
   Alert,
   AppState,
   Linking,
+  Animated,
 } from 'react-native';
-import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { TourProvider, useTour } from 'guideway';
+import {
+  ALL_TOURS,
+  guidewayTheme,
+  tourStorage,
+  hasSeenTour,
+  markTourSeen,
+  TOUR_IDS,
+} from './src/tour/tours';
+import { useGsapTabTransition } from './src/utils/gsapAnimation';
 import { AuthScreen } from './src/screens/AuthScreen';
 import { EnvVaultScreen } from './src/screens/EnvVaultScreen';
 import { TeamScreen } from './src/screens/TeamScreen';
@@ -29,6 +40,7 @@ import {
   getActiveRefreshToken,
   registerAuthCallbacks,
   apiClient,
+  setApiBaseUrl,
 } from './src/utils/apiClient';
 import { AlertProvider, showCustomAlert } from './src/components/CustomAlert';
 import { ServerLoadingIndicator } from './src/components/ServerLoadingIndicator';
@@ -37,6 +49,8 @@ import { Skeleton } from './src/components/Skeleton';
 const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || '';
 if (!API_BASE_URL) {
   console.warn('⚠️ EXPO_PUBLIC_API_URL is missing. Please configure it in your .env file.');
+} else {
+  setApiBaseUrl(API_BASE_URL);
 }
 
 interface User {
@@ -61,7 +75,8 @@ interface Team {
   createdBy?: string;
 }
 
-export default function App() {
+function MainApp() {
+  const { start } = useTour();
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [isRestoringSession, setIsRestoringSession] = useState(true);
@@ -73,6 +88,7 @@ export default function App() {
   const [activeTeamId, setActiveTeamId] = useState<string>('');
 
   const [activeTab, setActiveTab] = useState<'envs' | 'team'>('envs');
+  const { animatedStyle: tabAnimatedStyle } = useGsapTabTransition(activeTab);
 
   // Modals
   const [wsModalOpen, setWsModalOpen] = useState(false);
@@ -144,6 +160,31 @@ export default function App() {
       refreshToken: newRefreshToken,
       user: newUser,
     });
+
+    // Automatically trigger Guideway onboarding tour for new/first-time users
+    try {
+      const seen = await hasSeenTour(TOUR_IDS.WELCOME, newUser.id);
+      if (!seen) {
+        setTimeout(() => {
+          start(TOUR_IDS.WELCOME);
+          markTourSeen(TOUR_IDS.WELCOME, newUser.id);
+        }, 800);
+      }
+    } catch (e) {
+      console.log('Error triggering onboarding tour:', e);
+    }
+  };
+
+  const handleStartTour = () => {
+    if (activeTab === 'team') {
+      start(TOUR_IDS.TEAM);
+    } else {
+      start(TOUR_IDS.VAULT);
+    }
+  };
+
+  const handleReplayWelcomeTour = () => {
+    start(TOUR_IDS.WELCOME);
   };
 
   const executeLogout = async () => {
@@ -178,7 +219,7 @@ export default function App() {
 
     showCustomAlert({
       title: 'Log Out',
-      message: 'Are you sure you want to log out of Tubo on this device?',
+      message: 'Are you sure you want to log out of Env Vault on this device?',
       type: 'warning',
       buttons: [
         { text: 'Cancel', style: 'cancel' },
@@ -325,10 +366,20 @@ export default function App() {
   }, [token, activeWorkspaceId]);
 
   return (
-    <SafeAreaProvider>
-      <AlertProvider>
-        <ServerLoadingIndicator />
-        {isRestoringSession ? (
+    <>
+      <ServerLoadingIndicator />
+      {!API_BASE_URL ? (
+          <SafeAreaView style={styles.splashContainer} edges={['top', 'left', 'right', 'bottom']}>
+            <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
+            <Text style={{ fontSize: 36, marginBottom: 16 }}>⚠️</Text>
+            <Text style={[styles.splashText, { fontWeight: '800', color: COLORS.danger, marginBottom: 8 }]}>
+              Configuration Required
+            </Text>
+            <Text style={{ color: COLORS.textMuted, fontSize: 14, textAlign: 'center', maxWidth: 300, lineHeight: 22 }}>
+              EXPO_PUBLIC_API_URL is missing. Please configure it in your environment file before running the app.
+            </Text>
+          </SafeAreaView>
+        ) : isRestoringSession ? (
           <SafeAreaView style={styles.splashContainer} edges={['top', 'left', 'right', 'bottom']}>
             <StatusBar barStyle="light-content" backgroundColor={COLORS.bg} />
             <ActivityIndicator size="large" color={COLORS.primary} />
@@ -364,38 +415,41 @@ export default function App() {
               onOpenAccount={() => setAccountModalOpen(true)}
               onRefresh={handleRefresh}
               isRefreshing={isRefreshing}
+              onStartTour={handleStartTour}
               token={token}
               apiBaseUrl={API_BASE_URL}
             />
 
-            {/* Main Body Content */}
+            {/* Main Body Content with GSAP Smooth Transition */}
             <View style={styles.body}>
-              {activeTab === 'envs' ? (
-                <EnvVaultScreen
-                  token={token}
-                  workspaceId={activeWorkspaceId}
-                  teamId={activeTeamId}
-                  workspace={workspaces.find(w => w.id === activeWorkspaceId)}
-                  team={teams.find(t => t.id === activeTeamId)}
-                  apiBaseUrl={API_BASE_URL}
-                  user={user}
-                  refreshTrigger={refreshTrigger}
-                />
-              ) : (
-                <TeamScreen
-                  token={token}
-                  workspaceId={activeWorkspaceId}
-                  teamId={activeTeamId}
-                  team={teams.find(t => t.id === activeTeamId)}
-                  workspaces={workspaces}
-                  allTeams={teams}
-                  apiBaseUrl={API_BASE_URL}
-                  user={user}
-                  refreshTrigger={refreshTrigger}
-                  onTeamUpdated={handleTeamUpdated}
-                  onTeamDeleted={handleTeamDeleted}
-                />
-              )}
+              <Animated.View style={tabAnimatedStyle} key={activeTab}>
+                {activeTab === 'envs' ? (
+                  <EnvVaultScreen
+                    token={token}
+                    workspaceId={activeWorkspaceId}
+                    teamId={activeTeamId}
+                    workspace={workspaces.find(w => w.id === activeWorkspaceId)}
+                    team={teams.find(t => t.id === activeTeamId)}
+                    apiBaseUrl={API_BASE_URL}
+                    user={user}
+                    refreshTrigger={refreshTrigger}
+                  />
+                ) : (
+                  <TeamScreen
+                    token={token}
+                    workspaceId={activeWorkspaceId}
+                    teamId={activeTeamId}
+                    team={teams.find(t => t.id === activeTeamId)}
+                    workspaces={workspaces}
+                    allTeams={teams}
+                    apiBaseUrl={API_BASE_URL}
+                    user={user}
+                    refreshTrigger={refreshTrigger}
+                    onTeamUpdated={handleTeamUpdated}
+                    onTeamDeleted={handleTeamDeleted}
+                  />
+                )}
+              </Animated.View>
             </View>
 
             {/* Workspace Creation Modal */}
@@ -430,10 +484,38 @@ export default function App() {
               user={user}
               apiBaseUrl={API_BASE_URL}
               onUserUpdated={handleUserUpdated}
+              onReplayTour={handleReplayWelcomeTour}
             />
           </SafeAreaView>
         )}
+    </>
+  );
+}
+
+function AppWithTour() {
+  const insets = useSafeAreaInsets();
+
+  return (
+    <TourProvider
+      tours={ALL_TOURS}
+      theme={guidewayTheme}
+      colorScheme="dark"
+      insets={insets}
+      storage={tourStorage}
+      defaultCutout={{ shape: 'rounded', radius: 10, padding: 6 }}
+      overlayTapBehavior="next"
+    >
+      <AlertProvider>
+        <MainApp />
       </AlertProvider>
+    </TourProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <AppWithTour />
     </SafeAreaProvider>
   );
 }
