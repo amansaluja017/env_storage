@@ -8,9 +8,11 @@ import {
   ScrollView,
   ActivityIndicator,
   Modal,
-  Alert,
   Platform,
+  Animated,
 } from 'react-native';
+import { useForm, Controller } from 'react-hook-form';
+import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '../theme';
 import {
   initMobileSqlite,
@@ -18,46 +20,307 @@ import {
   upsertMobileEnv,
   deleteMobileEnv,
   bulkImportMobileEnvs,
+  getMobileFolders,
+  createMobileFolder,
+  updateMobileFolder,
+  deleteMobileFolder,
+  getMobileVaultStats,
+  syncFoldersFromRemote,
+  syncEnvsFromRemote,
   EnvItem,
+  FolderItem,
 } from '../storage/mobileSqlite';
+import { apiClient } from '../utils/apiClient';
+import { SqliteInspectorModal } from '../components/SqliteInspectorModal';
+import { showCustomAlert } from '../components/CustomAlert';
+import { FoldersListSkeleton, EnvsListSkeleton } from '../components/Skeleton';
 
 interface EnvVaultScreenProps {
   token: string;
   workspaceId: string;
   teamId: string;
   apiBaseUrl: string;
+  user?: { id: string; email: string; name: string; role?: 'admin' | 'member' } | null;
+  workspace?: { id: string; name: string; slug: string; ownerId?: string } | null;
+  team?: { id: string; workspaceId?: string; name: string; description?: string; createdBy?: string } | null;
+  refreshTrigger?: number;
 }
 
-export function EnvVaultScreen({ token, workspaceId, teamId, apiBaseUrl }: EnvVaultScreenProps) {
+interface EnvFormData {
+  key: string;
+  value: string;
+  comment: string;
+  isSecret: boolean;
+  folderId: string;
+}
+
+interface CreateFolderFormData {
+  name: string;
+  description: string;
+}
+
+interface RawDotEnvFormData {
+  rawDotEnv: string;
+  folderId: string;
+}
+
+export function EnvVaultScreen({
+  token,
+  workspaceId,
+  teamId,
+  workspace,
+  team,
+  apiBaseUrl,
+  user,
+  refreshTrigger,
+}: EnvVaultScreenProps) {
   const [environment, setEnvironment] = useState<'development' | 'staging' | 'production'>('development');
   const [envsList, setEnvsList] = useState<EnvItem[]>([]);
+  const [foldersList, setFoldersList] = useState<FolderItem[]>([]);
+  const [vaultStats, setVaultStats] = useState({ totalEnvs: 0, rootEnvs: 0, folderCount: 0 });
+  const [currentUserTeamRole, setCurrentUserTeamRole] = useState<'admin' | 'member' | 'owner' | null>(null);
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const [savingFolder, setSavingFolder] = useState(false);
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [foldersLoading, setFoldersLoading] = useState(false);
   const [search, setSearch] = useState('');
+  const [folderSearch, setFolderSearch] = useState('');
   const [revealedIds, setRevealedIds] = useState<Record<string, boolean>>({});
 
-  // Add / Edit Modal State
+  // Section Refresh animation & handler
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const spinValue = React.useRef(new Animated.Value(0)).current;
+
+  const handleManualRefresh = async () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    spinValue.setValue(0);
+    Animated.timing(spinValue, {
+      toValue: 1,
+      duration: 650,
+      useNativeDriver: true,
+    }).start();
+
+    try {
+      if (selectedFolderId !== null) {
+        await fetchEnvs();
+      } else {
+        await fetchFolders();
+      }
+    } finally {
+      setTimeout(() => setIsRefreshing(false), 300);
+    }
+  };
+
+  const spin = spinValue.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  });
+
+  // Folder Modal State (react-hook-form)
+  const [folderModalVisible, setFolderModalVisible] = useState(false);
+  const [creatingFolder, setCreatingFolder] = useState(false);
+
+  const {
+    control: folderControl,
+    handleSubmit: handleFolderSubmit,
+    reset: resetFolderForm,
+    formState: { errors: folderErrors },
+  } = useForm<CreateFolderFormData>({
+    defaultValues: {
+      name: '',
+      description: '',
+    },
+  });
+
+  // Add / Edit Variable Modal State (react-hook-form)
   const [modalVisible, setModalVisible] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [keyInput, setKeyInput] = useState('');
-  const [valueInput, setValueInput] = useState('');
-  const [commentInput, setCommentInput] = useState('');
-  const [isSecretInput, setIsSecretInput] = useState(true);
   const [submitting, setSubmitting] = useState(false);
 
-  // Bulk Raw .env Modal State
+  const {
+    control: envControl,
+    handleSubmit: handleEnvSubmit,
+    reset: resetEnvForm,
+    setValue: setEnvValue,
+    watch: watchEnv,
+    formState: { errors: envErrors },
+  } = useForm<EnvFormData>({
+    defaultValues: {
+      key: '',
+      value: '',
+      comment: '',
+      isSecret: true,
+      folderId: '',
+    },
+  });
+
+  // Bulk Raw .env Modal State (react-hook-form)
   const [rawModalVisible, setRawModalVisible] = useState(false);
-  const [rawDotEnv, setRawDotEnv] = useState('');
+
+  const {
+    control: rawControl,
+    handleSubmit: handleRawSubmit,
+    reset: resetRawForm,
+    formState: { errors: rawErrors },
+  } = useForm<RawDotEnvFormData>({
+    defaultValues: {
+      rawDotEnv: '',
+      folderId: '',
+    },
+  });
+
+  // SQLite DB Inspector Modal State
+  const [sqliteModalVisible, setSqliteModalVisible] = useState(false);
+  const [dbReady, setDbReady] = useState(false);
 
   useEffect(() => {
-    initMobileSqlite();
+    initMobileSqlite()
+      .then(() => setDbReady(true))
+      .catch((err) => {
+        console.log('Error initializing mobile SQLite:', err);
+        setDbReady(true);
+      });
   }, []);
 
-  const fetchEnvs = async () => {
+  // Fetch logged in user's role in this team to evaluate admin privileges
+  useEffect(() => {
+    if (!teamId || !token) return;
+    apiClient
+      .get(`${apiBaseUrl}/trpc/team.getMembers`, {
+        params: { input: JSON.stringify({ teamId }) },
+      })
+      .then((res) => {
+        if (res.data?.result?.data) {
+          const members = res.data.result.data;
+          const me = members.find((m: any) => m.userId === user?.id);
+          if (me) {
+            setCurrentUserTeamRole(me.role || me.userRole || null);
+          }
+        }
+      })
+      .catch(() => {});
+  }, [teamId, token, user?.id]);
+
+  const isCurrentAdmin =
+    user?.role === 'admin' ||
+    workspace?.ownerId === user?.id ||
+    team?.createdBy === user?.id ||
+    currentUserTeamRole === 'admin' ||
+    currentUserTeamRole === 'owner';
+
+  const canModify = (item?: { createdById?: string; createdBy?: string } | null) => {
+    if (!item) return false;
+    if (isCurrentAdmin) return true;
+    if (item.createdById && user?.id && item.createdById === user.id) return true;
+    if (item.createdBy && user?.name && item.createdBy === user.name) return true;
+    if (item.createdBy && user?.id && item.createdBy === user.id) return true;
+    return false;
+  };
+
+  const fetchFolders = async () => {
     if (!workspaceId || !teamId) return;
+    setFoldersLoading(true);
+    try {
+      // 1. Read SQLite first (instant local response)
+      const [fList, stats] = await Promise.all([
+        getMobileFolders(workspaceId, teamId, environment),
+        getMobileVaultStats(workspaceId, teamId, environment),
+      ]);
+      setFoldersList(fList);
+      setVaultStats(stats);
+
+      // 2. Background sync: fetch remote folders from PostgreSQL & reconcile into SQLite
+      apiClient
+        .get(`${apiBaseUrl}/trpc/folder.list`, {
+          params: {
+            input: JSON.stringify({
+              workspaceId,
+              teamId,
+              environment,
+            }),
+          },
+        })
+        .then(async (res) => {
+          const remoteFolders = res.data?.result?.data;
+          if (Array.isArray(remoteFolders)) {
+            await syncFoldersFromRemote(workspaceId, teamId, environment, remoteFolders);
+            const [updatedFList, updatedStats] = await Promise.all([
+              getMobileFolders(workspaceId, teamId, environment),
+              getMobileVaultStats(workspaceId, teamId, environment),
+            ]);
+            setFoldersList(updatedFList);
+            setVaultStats(updatedStats);
+          }
+        })
+        .catch((err) => {
+          console.log('Background folder sync note:', err?.message || err);
+        });
+    } catch (e) {
+      console.log('Error reading Mobile SQLite folders:', e);
+    } finally {
+      setFoldersLoading(false);
+    }
+  };
+
+  const fetchEnvs = async () => {
+    if (!workspaceId || !teamId || selectedFolderId === null) return;
     setLoading(true);
     try {
-      const items = await getMobileEnvs(workspaceId, teamId, environment);
+      // 1. Read SQLite first (instant local response)
+      const items = await getMobileEnvs(
+        workspaceId,
+        teamId,
+        environment,
+        undefined,
+        selectedFolderId
+      );
       setEnvsList(items);
+      await fetchFolders();
+
+      // 2. Background sync: fetch remote envs from PostgreSQL & reconcile into SQLite
+      const queryFolderId =
+        selectedFolderId === 'all'
+          ? undefined
+          : selectedFolderId === 'root'
+          ? null
+          : selectedFolderId;
+
+      apiClient
+        .get(`${apiBaseUrl}/trpc/env.list`, {
+          params: {
+            input: JSON.stringify({
+              workspaceId,
+              teamId,
+              environment,
+              folderId: queryFolderId,
+            }),
+          },
+        })
+        .then(async (res) => {
+          const remoteEnvs = res.data?.result?.data;
+          if (Array.isArray(remoteEnvs)) {
+            await syncEnvsFromRemote(workspaceId, teamId, environment, remoteEnvs);
+            const updated = await getMobileEnvs(
+              workspaceId,
+              teamId,
+              environment,
+              undefined,
+              selectedFolderId
+            );
+            setEnvsList(updated);
+            const [fList, stats] = await Promise.all([
+              getMobileFolders(workspaceId, teamId, environment),
+              getMobileVaultStats(workspaceId, teamId, environment),
+            ]);
+            setFoldersList(fList);
+            setVaultStats(stats);
+          }
+        })
+        .catch((err) => {
+          console.log('Background env sync note:', err?.message || err);
+        });
     } catch (e) {
       console.log('Error reading Mobile SQLite envs:', e);
     } finally {
@@ -66,76 +329,340 @@ export function EnvVaultScreen({ token, workspaceId, teamId, apiBaseUrl }: EnvVa
   };
 
   useEffect(() => {
-    fetchEnvs();
-  }, [workspaceId, teamId, environment]);
+    if (dbReady) {
+      if (selectedFolderId !== null) {
+        fetchEnvs();
+      } else {
+        fetchFolders();
+      }
+    }
+  }, [dbReady, workspaceId, teamId, environment, selectedFolderId]);
 
-  const handleSaveEnv = async () => {
-    if (!keyInput.trim()) {
-      Alert.alert('Error', 'Please provide a valid key name (e.g. DATABASE_URL)');
+  // Re-fetch keys/folders when navbar refresh button is pressed
+  useEffect(() => {
+    if (dbReady && refreshTrigger && refreshTrigger > 0) {
+      if (selectedFolderId !== null) {
+        fetchEnvs();
+      } else {
+        fetchFolders();
+      }
+    }
+  }, [refreshTrigger]);
+
+  const openCreateFolder = () => {
+    setEditingFolderId(null);
+    resetFolderForm({ name: '', description: '' });
+    setFolderModalVisible(true);
+  };
+
+  const openEditFolder = (folder: FolderItem) => {
+    if (!canModify(folder)) {
+      showCustomAlert({
+        title: 'Permission Denied',
+        message: 'Only the creator of this folder or an admin can edit it.',
+        type: 'danger',
+      });
       return;
     }
-    setSubmitting(true);
+    setEditingFolderId(folder.id);
+    resetFolderForm({ name: folder.name, description: folder.description || '' });
+    setFolderModalVisible(true);
+  };
+
+  // Create / Update Folder Handler
+  const onSaveFolder = async (data: CreateFolderFormData) => {
+    setSavingFolder(true);
+    const creatorName = user?.name || 'Mobile User';
     try {
-      await upsertMobileEnv({
+      if (editingFolderId) {
+        // Edit existing folder
+        await updateMobileFolder(editingFolderId, data.name, data.description);
+        setFolderModalVisible(false);
+        resetFolderForm({ name: '', description: '' });
+        setEditingFolderId(null);
+        await fetchFolders();
+
+        apiClient
+          .post(`${apiBaseUrl}/trpc/folder.update`, {
+            folderId: editingFolderId,
+            teamId,
+            name: data.name,
+            description: data.description || undefined,
+          })
+          .catch((err) => {
+            console.warn('Background sync to PostgreSQL failed for folder update:', err?.message || err);
+          });
+      } else {
+        // Create new folder
+        const newFolder = await createMobileFolder({
+          workspaceId,
+          teamId,
+          environment,
+          name: data.name,
+          description: data.description,
+          createdBy: creatorName,
+          createdById: user?.id,
+        });
+
+        setFolderModalVisible(false);
+        resetFolderForm({ name: '', description: '' });
+        setSelectedFolderId(newFolder.id);
+        await fetchFolders();
+
+        apiClient
+          .post(`${apiBaseUrl}/trpc/folder.create`, {
+            id: newFolder.id,
+            workspaceId,
+            teamId,
+            environment,
+            name: data.name,
+            description: data.description || undefined,
+          })
+          .catch((err) => {
+            console.warn('Background sync to PostgreSQL failed for folder:', err?.message || err);
+          });
+      }
+    } catch (e: any) {
+      showCustomAlert({
+        title: editingFolderId ? 'Folder Update Failed' : 'Folder Creation Failed',
+        message: e.message || 'Unable to save folder',
+        type: 'danger',
+      });
+    } finally {
+      setSavingFolder(false);
+    }
+  };
+
+  // Delete Folder Handler
+  const handleDeleteFolder = (folder: FolderItem) => {
+    if (!canModify(folder)) {
+      showCustomAlert({
+        title: 'Permission Denied',
+        message: 'Only the creator of this folder or an admin can delete it.',
+        type: 'danger',
+      });
+      return;
+    }
+
+    showCustomAlert({
+      title: `Delete Folder "${folder.name}"`,
+      message: 'Do you want to delete this folder? Variables inside will be moved to Root (Unfiled).',
+      type: 'danger',
+      buttons: [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete Folder',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // 1. Delete in SQLite first
+              await deleteMobileFolder(folder.id, false);
+              if (selectedFolderId === folder.id) {
+                setSelectedFolderId(null);
+              }
+              await fetchFolders();
+              if (selectedFolderId !== null && selectedFolderId !== folder.id) {
+                await fetchEnvs();
+              }
+
+              // 2. Delete from PostgreSQL in background
+              apiClient
+                .post(`${apiBaseUrl}/trpc/folder.delete`, {
+                  folderId: folder.id,
+                  teamId,
+                  deleteEnvs: false,
+                })
+                .catch((err) => {
+                  console.warn('Background delete folder from PostgreSQL failed:', err?.message || err);
+                });
+            } catch (e: any) {
+              showCustomAlert({
+                title: 'Delete Failed',
+                message: e.message,
+                type: 'danger',
+              });
+            }
+          },
+        },
+      ],
+    });
+  };
+
+  // Save Variable Handler
+  const onSaveEnv = async (data: EnvFormData) => {
+    setSubmitting(true);
+    const creatorName = user?.name || 'Mobile User';
+    try {
+      // 1. Write to SQLite first
+      const saved = await upsertMobileEnv({
         id: editingId || undefined,
         workspaceId,
         teamId,
         environment,
-        key: keyInput.toUpperCase().trim(),
-        value: valueInput,
-        isSecret: isSecretInput,
-        comment: commentInput,
-        createdBy: 'Mobile User',
+        folderId: data.folderId ? data.folderId : null,
+        key: data.key.toUpperCase().trim(),
+        value: data.value,
+        isSecret: data.isSecret,
+        comment: data.comment,
+        createdBy: creatorName,
+        createdById: user?.id,
       });
+
       setModalVisible(false);
-      resetForm();
-      fetchEnvs();
+      const targetFolder =
+        selectedFolderId && selectedFolderId !== 'all' && selectedFolderId !== 'root'
+          ? selectedFolderId
+          : '';
+      resetEnvForm({
+        key: '',
+        value: '',
+        comment: '',
+        isSecret: true,
+        folderId: targetFolder,
+      });
+      if (selectedFolderId !== null) {
+        await fetchEnvs();
+      } else {
+        await fetchFolders();
+      }
+
+      // 2. Persist to PostgreSQL in background
+      apiClient
+        .post(`${apiBaseUrl}/trpc/env.upsert`, {
+          id: saved.id,
+          workspaceId,
+          teamId,
+          environment,
+          folderId: data.folderId || null,
+          key: data.key.toUpperCase().trim(),
+          value: data.value,
+          isSecret: data.isSecret,
+          comment: data.comment || undefined,
+        })
+        .catch((err) => {
+          console.warn('Background sync to PostgreSQL failed for env:', err?.message || err);
+        });
     } catch (e: any) {
-      Alert.alert('Save Failed', e.message || 'Unable to save environment variable to Mobile SQLite');
+      showCustomAlert({
+        title: 'Save Failed',
+        message: e.message || 'Unable to save environment variable',
+        type: 'danger',
+      });
     } finally {
       setSubmitting(false);
     }
   };
 
   const handleDelete = async (id: string, keyName: string) => {
-    Alert.alert(
-      'Delete Environment Variable',
-      `Are you sure you want to delete ${keyName}?`,
-      [
+    const item = envsList.find(e => e.id === id);
+    if (!canModify(item)) {
+      showCustomAlert({
+        title: 'Permission Denied',
+        message: 'Only the creator of this variable or an admin can delete it.',
+        type: 'danger',
+      });
+      return;
+    }
+
+    showCustomAlert({
+      title: 'Delete Variable',
+      message: `Are you sure you want to delete "${keyName}" from the vault?`,
+      type: 'danger',
+      buttons: [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
             try {
+              // 1. Delete from SQLite first
               await deleteMobileEnv(id);
-              fetchEnvs();
-            } catch (e) {
-              console.log('Delete error:', e);
+              if (selectedFolderId !== null) {
+                await fetchEnvs();
+              } else {
+                await fetchFolders();
+              }
+
+              // 2. Delete from PostgreSQL in background
+              apiClient
+                .post(`${apiBaseUrl}/trpc/env.delete`, {
+                  id,
+                  teamId,
+                })
+                .catch((err) => {
+                  console.warn('Background delete env from PostgreSQL failed:', err?.message || err);
+                });
+            } catch (e: any) {
+              showCustomAlert({
+                title: 'Delete Error',
+                message: e.message || 'Failed to delete environment variable',
+                type: 'danger',
+              });
             }
           },
         },
-      ]
-    );
+      ],
+    });
   };
 
-  const handleImportBulk = async () => {
-    if (!rawDotEnv.trim()) return;
+  const onImportBulk = async (data: RawDotEnvFormData) => {
+    if (!data.rawDotEnv.trim()) return;
     setSubmitting(true);
     try {
-      const result = await bulkImportMobileEnvs(
+      const creatorName = user?.name || 'Mobile User';
+      const defaultFolder =
+        selectedFolderId && selectedFolderId !== 'all' && selectedFolderId !== 'root'
+          ? selectedFolderId
+          : null;
+      const targetFolderId = data.folderId || defaultFolder;
+
+      // 1. Import to SQLite first
+      await bulkImportMobileEnvs(
         workspaceId,
         teamId,
         environment,
-        rawDotEnv,
-        'Mobile User'
+        data.rawDotEnv,
+        creatorName,
+        targetFolderId
       );
-      Alert.alert('Success', `Imported ${result.importedCount} variables to Mobile SQLite!`);
+
       setRawModalVisible(false);
-      setRawDotEnv('');
-      fetchEnvs();
+      resetRawForm({ rawDotEnv: '', folderId: '' });
+      if (selectedFolderId !== null) {
+        await fetchEnvs();
+      } else {
+        await fetchFolders();
+      }
+
+      // 2. Persist bulk import to PostgreSQL in background
+      apiClient
+        .post(`${apiBaseUrl}/trpc/env.bulkImport`, {
+          workspaceId,
+          teamId,
+          environment,
+          folderId: targetFolderId,
+          rawDotEnv: data.rawDotEnv,
+        })
+        .then(async (res) => {
+          const imported = res.data?.result?.data;
+          if (Array.isArray(imported)) {
+            await syncEnvsFromRemote(workspaceId, teamId, environment, imported);
+            if (selectedFolderId !== null) {
+              await fetchEnvs();
+            } else {
+              await fetchFolders();
+            }
+          }
+        })
+        .catch((err) => {
+          console.warn('Background bulk import to PostgreSQL failed:', err?.message || err);
+        });
     } catch (e: any) {
-      Alert.alert('Import Failed', e.message);
+      showCustomAlert({
+        title: 'Import Failed',
+        message: e.message || 'Unable to import environment variables',
+        type: 'danger',
+      });
     } finally {
       setSubmitting(false);
     }
@@ -145,219 +672,729 @@ export function EnvVaultScreen({ token, workspaceId, teamId, apiBaseUrl }: EnvVa
     setRevealedIds(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  const resetForm = () => {
+  const openAdd = (targetFolderOverride?: string) => {
     setEditingId(null);
-    setKeyInput('');
-    setValueInput('');
-    setCommentInput('');
-    setIsSecretInput(true);
-  };
-
-  const openEdit = (item: EnvItem) => {
-    setEditingId(item.id);
-    setKeyInput(item.key);
-    setValueInput(item.value);
-    setCommentInput(item.comment || '');
-    setIsSecretInput(item.isSecret);
+    const targetFolder =
+      targetFolderOverride !== undefined
+        ? targetFolderOverride
+        : selectedFolderId && selectedFolderId !== 'all' && selectedFolderId !== 'root'
+        ? selectedFolderId
+        : '';
+    resetEnvForm({
+      key: '',
+      value: '',
+      comment: '',
+      isSecret: true,
+      folderId: targetFolder,
+    });
     setModalVisible(true);
   };
 
-  const filteredEnvs = envsList.filter(e =>
-    e.key.toLowerCase().includes(search.toLowerCase()) ||
-    (e.comment && e.comment.toLowerCase().includes(search.toLowerCase()))
+  const openEdit = (item: EnvItem) => {
+    if (!canModify(item)) {
+      showCustomAlert({
+        title: 'Permission Denied',
+        message: 'Only the creator of this variable or an admin can edit it.',
+        type: 'danger',
+      });
+      return;
+    }
+    setEditingId(item.id);
+    resetEnvForm({
+      key: item.key,
+      value: item.value,
+      comment: item.comment || '',
+      isSecret: item.isSecret,
+      folderId: item.folderId || '',
+    });
+    setModalVisible(true);
+  };
+
+  const filteredEnvs = envsList.filter(
+    e =>
+      e.key.toLowerCase().includes(search.toLowerCase()) ||
+      (e.comment && e.comment.toLowerCase().includes(search.toLowerCase())) ||
+      (e.folderName && e.folderName.toLowerCase().includes(search.toLowerCase()))
+  );
+
+  const filteredFolders = foldersList.filter(
+    f =>
+      f.name.toLowerCase().includes(folderSearch.toLowerCase()) ||
+      (f.description && f.description.toLowerCase().includes(folderSearch.toLowerCase()))
   );
 
   const formattedDotEnvExport = filteredEnvs
     .map(e => `${e.key}="${e.value}"`)
     .join('\n');
 
+  const openRawModal = () => {
+    const targetFolder =
+      selectedFolderId && selectedFolderId !== 'all' && selectedFolderId !== 'root'
+        ? selectedFolderId
+        : '';
+    resetRawForm({
+      rawDotEnv: formattedDotEnvExport,
+      folderId: targetFolder,
+    });
+    setRawModalVisible(true);
+  };
+
+  const activeFolderObj = foldersList.find(f => f.id === selectedFolderId);
+
   return (
     <View style={styles.container}>
-      {/* DB Engine Badge */}
-      <View style={styles.engineBar}>
-        <View style={styles.engineBadge}>
-          <Text style={styles.engineBadgeText}>🗄️ SQLite Engine Active</Text>
-        </View>
-        <Text style={styles.engineMeta}>Encrypted Local Vault Storage</Text>
-      </View>
-
-      {/* Environment Selector Tabs */}
-      <View style={styles.envTabsRow}>
-        {(['development', 'staging', 'production'] as const).map(envName => {
-          const isActive = environment === envName;
-          return (
-            <TouchableOpacity
-              key={envName}
-              style={[styles.envTab, isActive && styles.envTabActive]}
-              onPress={() => setEnvironment(envName)}
-            >
-              <Text style={[styles.envTabText, isActive && styles.envTabTextActive]}>
-                {envName.toUpperCase()}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
-
-      {/* Actions & Search */}
-      <View style={styles.actionRow}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Filter variables..."
-          placeholderTextColor={COLORS.textMuted}
-          value={search}
-          onChangeText={setSearch}
-        />
+      {/* DB Engine Badge & Inspector Trigger (shown in Folders view) */}
+      {selectedFolderId === null && (
         <TouchableOpacity
-          style={styles.addBtn}
-          onPress={() => {
-            resetForm();
-            setModalVisible(true);
-          }}
+          style={styles.engineBar}
+          onPress={() => setSqliteModalVisible(true)}
+          activeOpacity={0.7}
         >
-          <Text style={styles.addBtnText}>+ Add Key</Text>
+          <View style={styles.engineBadge}>
+            <Text style={styles.engineBadgeText}>🗄️ SQLite Engine Active</Text>
+          </View>
+          <Text style={styles.inspectLink}>Inspect SQLite DB Data →</Text>
         </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.bulkBtn}
-          onPress={() => setRawModalVisible(true)}
-        >
-          <Text style={styles.bulkBtnText}>📄 .env</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Env Items List */}
-      {loading ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={COLORS.primary} />
-          <Text style={styles.loadingText}>Reading SQLite Vault...</Text>
-        </View>
-      ) : filteredEnvs.length === 0 ? (
-        <View style={styles.emptyContainer}>
-          <Text style={styles.emptyIcon}>📦</Text>
-          <Text style={styles.emptyTitle}>No Environment Variables</Text>
-          <Text style={styles.emptyText}>
-            No variables set for {environment.toUpperCase()} in this team.
-          </Text>
-          <TouchableOpacity
-            style={styles.emptyAddBtn}
-            onPress={() => {
-              resetForm();
-              setModalVisible(true);
-            }}
-          >
-            <Text style={styles.emptyAddBtnText}>Add First Variable</Text>
-          </TouchableOpacity>
-        </View>
-      ) : (
-        <ScrollView style={styles.listScroll} contentContainerStyle={styles.listContent}>
-          {filteredEnvs.map(item => {
-            const isRevealed = revealedIds[item.id];
-            const displayValue = item.isSecret && !isRevealed ? '••••••••••••••••' : item.value;
-
-            return (
-              <View key={item.id} style={styles.card}>
-                <View style={styles.cardHeader}>
-                  <View style={styles.keyBadgeContainer}>
-                    <Text style={styles.keyName}>{item.key}</Text>
-                    {item.isSecret && (
-                      <View style={styles.secretTag}>
-                        <Text style={styles.secretTagText}>SECRET</Text>
-                      </View>
-                    )}
-                  </View>
-                  <View style={styles.cardActions}>
-                    {item.isSecret && (
-                      <TouchableOpacity
-                        style={styles.actionIconBtn}
-                        onPress={() => toggleReveal(item.id)}
-                      >
-                        <Text style={styles.actionIconText}>
-                          {isRevealed ? '🙈' : '👁️'}
-                        </Text>
-                      </TouchableOpacity>
-                    )}
-                    <TouchableOpacity
-                      style={styles.actionIconBtn}
-                      onPress={() => openEdit(item)}
-                    >
-                      <Text style={styles.actionIconText}>✏️</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.actionIconBtn}
-                      onPress={() => handleDelete(item.id, item.key)}
-                    >
-                      <Text style={styles.actionIconText}>🗑️</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-
-                {/* Value Box */}
-                <View style={styles.valueBox}>
-                  <Text style={styles.valueText} numberOfLines={2}>
-                    {displayValue}
-                  </Text>
-                </View>
-
-                {item.comment ? (
-                  <Text style={styles.commentText}>💡 {item.comment}</Text>
-                ) : null}
-
-                <View style={styles.metaRow}>
-                  <Text style={styles.metaText}>By {item.createdBy}</Text>
-                  <Text style={styles.metaText}>SQLite Engine</Text>
-                </View>
-              </View>
-            );
-          })}
-        </ScrollView>
       )}
 
-      {/* Add / Edit Modal */}
+      {/* Environment Selector Tabs (shown in Folders view) */}
+      {selectedFolderId === null && (
+        <View style={styles.envTabsRow}>
+          {(['development', 'staging', 'production'] as const).map(envName => {
+            const isActive = environment === envName;
+            return (
+              <TouchableOpacity
+                key={envName}
+                style={[styles.envTab, isActive && styles.envTabActive]}
+                onPress={() => {
+                  setEnvironment(envName);
+                  setSelectedFolderId(null);
+                }}
+              >
+                <Text style={[styles.envTabText, isActive && styles.envTabTextActive]}>
+                  {envName.toUpperCase()}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      )}
+
+      {/* VIEW 1: FOLDERS VIEW (when selectedFolderId === null) */}
+      {selectedFolderId === null ? (
+        <View style={{ flex: 1 }}>
+          {/* Folders Section Header */}
+          <View style={styles.foldersHeader}>
+            <View style={styles.foldersHeaderLeft}>
+              <Text style={styles.sectionTitle}>FOLDERS</Text>
+              <View style={styles.folderCountBadge}>
+                <Text style={styles.folderCountText}>{foldersList.length}</Text>
+              </View>
+              <TouchableOpacity
+                style={styles.sectionRefreshBtn}
+                onPress={handleManualRefresh}
+                activeOpacity={0.7}
+                accessibilityLabel="Refresh folders"
+              >
+                <Animated.View style={{ transform: [{ rotate: spin }] }}>
+                  <Ionicons
+                    name="refresh-outline"
+                    size={14}
+                    color={isRefreshing ? COLORS.primary : COLORS.textMuted}
+                  />
+                </Animated.View>
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity
+              style={styles.newFolderBtn}
+              onPress={openCreateFolder}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="folder-outline" size={13} color={COLORS.secondary} style={{ marginRight: 4 }} />
+              <Text style={styles.newFolderBtnText}>+ New Folder</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Search Folders Bar */}
+          <View style={styles.searchBarRow}>
+            <Ionicons name="search" size={15} color={COLORS.textMuted} style={styles.searchIcon} />
+            <TextInput
+              style={styles.folderSearchInput}
+              placeholder="Search folders..."
+              placeholderTextColor={COLORS.textMuted}
+              value={folderSearch}
+              onChangeText={setFolderSearch}
+            />
+            {folderSearch.length > 0 && (
+              <TouchableOpacity onPress={() => setFolderSearch('')}>
+                <Ionicons name="close-circle" size={16} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {/* Folders List or Empty State */}
+          <ScrollView style={styles.listScroll} contentContainerStyle={styles.listContent}>
+            {/* Root / Unfiled Folder Tile */}
+            <TouchableOpacity
+              style={styles.folderCard}
+              onPress={() => setSelectedFolderId('root')}
+              activeOpacity={0.7}
+            >
+              <View style={styles.folderCardLeft}>
+                <View style={[styles.folderIconBox, { backgroundColor: 'rgba(148, 163, 184, 0.12)' }]}>
+                  <Text style={styles.folderIconText}>📄</Text>
+                </View>
+                <View style={styles.folderCardInfo}>
+                  <Text style={styles.folderCardTitle}>Root / Unfiled</Text>
+                  <Text style={styles.folderCardDesc} numberOfLines={1}>
+                    Standalone environment variables not categorized in any folder
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.folderCardRight}>
+                <View style={styles.cardCountBadge}>
+                  <Text style={styles.cardCountText}>{vaultStats.rootEnvs} keys</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} style={{ marginLeft: 6 }} />
+              </View>
+            </TouchableOpacity>
+
+            {/* Custom Folders */}
+            {filteredFolders.map(folder => (
+              <TouchableOpacity
+                key={folder.id}
+                style={styles.folderCard}
+                onPress={() => setSelectedFolderId(folder.id)}
+                activeOpacity={0.7}
+              >
+                <View style={styles.folderCardLeft}>
+                  <View style={styles.folderIconBox}>
+                    <Text style={styles.folderIconText}>📂</Text>
+                  </View>
+                  <View style={styles.folderCardInfo}>
+                    <Text style={styles.folderCardTitle}>{folder.name}</Text>
+                    <Text style={styles.folderCardDesc} numberOfLines={1}>
+                      {folder.description || 'No description provided'}
+                    </Text>
+                    <Text style={styles.folderCardMeta}>By {folder.createdBy}</Text>
+                  </View>
+                </View>
+                <View style={styles.folderCardRight}>
+                  <View style={styles.cardCountBadge}>
+                    <Text style={styles.cardCountText}>{folder.envCount ?? 0} keys</Text>
+                  </View>
+                  {canModify(folder) && (
+                    <View style={styles.folderActionBtnsRow}>
+                      <TouchableOpacity
+                        style={styles.folderCardEditBtn}
+                        onPress={() => openEditFolder(folder)}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        accessibilityLabel="Edit folder"
+                      >
+                        <Ionicons name="pencil-outline" size={15} color={COLORS.secondary} />
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.folderCardDeleteBtn}
+                        onPress={() => handleDeleteFolder(folder)}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        accessibilityLabel="Delete folder"
+                      >
+                        <Ionicons name="trash-outline" size={15} color={COLORS.danger} />
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                  <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} style={{ marginLeft: 6 }} />
+                </View>
+              </TouchableOpacity>
+            ))}
+
+            {/* Empty state if no custom folders */}
+            {foldersList.length === 0 && (
+              <View style={styles.emptyFolderBox}>
+                <Text style={styles.emptyFolderIcon}>📂</Text>
+                <Text style={styles.emptyFolderTitle}>No Custom Folders Yet</Text>
+                <Text style={styles.emptyFolderText}>
+                  Create folders to organize your variables (e.g. Backend API, Stripe, Mobile App).
+                </Text>
+                <TouchableOpacity
+                  style={styles.createFolderPrimaryBtn}
+                  onPress={openCreateFolder}
+                >
+                  <Ionicons name="add" size={16} color="#000" style={{ marginRight: 4 }} />
+                  <Text style={styles.createFolderPrimaryBtnText}>Create First Folder</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* 3. All Variables Card */}
+            <TouchableOpacity
+              style={[styles.folderCard, styles.allEnvsCard]}
+              onPress={() => setSelectedFolderId('all')}
+              activeOpacity={0.7}
+            >
+              <View style={styles.folderCardLeft}>
+                <View style={[styles.folderIconBox, { backgroundColor: 'rgba(99, 102, 241, 0.15)' }]}>
+                  <Text style={styles.folderIconText}>🗄️</Text>
+                </View>
+                <View style={styles.folderCardInfo}>
+                  <Text style={styles.folderCardTitle}>All Variables</Text>
+                  <Text style={styles.folderCardDesc}>View all variables across all folders</Text>
+                </View>
+              </View>
+              <View style={styles.folderCardRight}>
+                <View style={[styles.cardCountBadge, { backgroundColor: 'rgba(99, 102, 241, 0.2)' }]}>
+                  <Text style={[styles.cardCountText, { color: '#818cf8' }]}>{vaultStats.totalEnvs} keys</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} style={{ marginLeft: 6 }} />
+              </View>
+            </TouchableOpacity>
+          </ScrollView>
+
+          {/* Folders Bottom Actions Bar */}
+          <View style={styles.foldersBottomActions}>
+            <TouchableOpacity
+              style={styles.actionPillBtn}
+              onPress={openCreateFolder}
+            >
+              <Ionicons name="folder-outline" size={14} color={COLORS.secondary} style={{ marginRight: 6 }} />
+              <Text style={styles.actionPillText}>+ New Folder</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.actionPillBtn, { borderColor: COLORS.primary }]}
+              onPress={() => openAdd('')}
+            >
+              <Ionicons name="add" size={16} color={COLORS.primary} style={{ marginRight: 4 }} />
+              <Text style={[styles.actionPillText, { color: COLORS.primary }]}>+ Add Key</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.actionPillBtn}
+              onPress={openRawModal}
+            >
+              <Ionicons name="document-text-outline" size={14} color={COLORS.textMuted} style={{ marginRight: 4 }} />
+              <Text style={styles.actionPillText}>Import .env</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ) : (
+        /* ================= 2. VARIABLES VIEW (INSIDE A FOLDER) ================= */
+        <View style={{ flex: 1 }}>
+          {/* Breadcrumb Navigation Trail */}
+          <View style={styles.breadcrumbBar}>
+            <TouchableOpacity
+              style={styles.breadcrumbItem}
+              onPress={() => setSelectedFolderId(null)}
+              activeOpacity={0.7}
+              accessibilityLabel="Back to folders"
+            >
+              <Ionicons name="chevron-back" size={14} color={COLORS.primary} style={{ marginRight: 2 }} />
+              <Ionicons name="folder-outline" size={14} color={COLORS.primary} style={{ marginRight: 4 }} />
+              <Text style={styles.breadcrumbLinkText}>Folders</Text>
+            </TouchableOpacity>
+
+            <Ionicons name="chevron-forward" size={12} color={COLORS.textMuted} style={styles.breadcrumbSeparator} />
+
+            <View style={styles.breadcrumbCurrentItem}>
+              <Text style={styles.breadcrumbCurrentIcon}>
+                {selectedFolderId === 'root' ? '📄' : selectedFolderId === 'all' ? '🗄️' : '📁'}
+              </Text>
+              <Text style={styles.breadcrumbCurrentText} numberOfLines={1}>
+                {selectedFolderId === 'root'
+                  ? 'Root / Unfiled'
+                  : selectedFolderId === 'all'
+                  ? 'All Variables'
+                  : activeFolderObj?.name || 'Folder'}
+              </Text>
+            </View>
+
+            <View style={{ flex: 1 }} />
+
+            <View style={styles.breadcrumbEnvBadge}>
+              <Text style={styles.breadcrumbEnvText}>{environment.toUpperCase()}</Text>
+            </View>
+          </View>
+
+          {/* Active Folder Header Card */}
+          <View style={styles.folderDetailsCard}>
+            <View style={styles.folderDetailsCardTop}>
+              <View style={styles.folderDetailsTitleGroup}>
+                <Text style={styles.folderDetailsIcon}>
+                  {selectedFolderId === 'root' ? '📄' : selectedFolderId === 'all' ? '🗄️' : '📁'}
+                </Text>
+                <Text style={styles.folderDetailsTitle} numberOfLines={1}>
+                  {selectedFolderId === 'root'
+                    ? 'Root / Unfiled'
+                    : selectedFolderId === 'all'
+                    ? 'All Variables'
+                    : activeFolderObj?.name || 'Folder'}
+                </Text>
+                <View style={styles.activeFolderBadge}>
+                  <Text style={styles.activeFolderBadgeText}>
+                    {filteredEnvs.length} {filteredEnvs.length === 1 ? 'key' : 'keys'}
+                  </Text>
+                </View>
+              </View>
+
+              {activeFolderObj && canModify(activeFolderObj) && (
+                <View style={styles.bannerFolderActionsRow}>
+                  <TouchableOpacity
+                    style={styles.bannerEditFolderBtn}
+                    onPress={() => openEditFolder(activeFolderObj)}
+                    accessibilityLabel="Edit folder"
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="pencil-outline" size={14} color={COLORS.secondary} />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.bannerDeleteFolderBtn}
+                    onPress={() => handleDeleteFolder(activeFolderObj)}
+                    accessibilityLabel="Delete folder"
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="trash-outline" size={14} color={COLORS.danger} />
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+
+            {activeFolderObj?.description ? (
+              <Text style={styles.folderDetailsDesc}>{activeFolderObj.description}</Text>
+            ) : null}
+          </View>
+
+          {/* Filter & Actions Bar */}
+          <View style={styles.actionRow}>
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Filter variables in folder..."
+              placeholderTextColor={COLORS.textMuted}
+              value={search}
+              onChangeText={setSearch}
+            />
+            <TouchableOpacity
+              style={styles.addBtn}
+              onPress={() => openAdd(selectedFolderId === 'root' ? '' : selectedFolderId)}
+            >
+              <Text style={styles.addBtnText}>+ Add Key</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.bulkBtn}
+              onPress={openRawModal}
+            >
+              <Text style={styles.bulkBtnText}>📄 .env</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Envs Items List */}
+          {loading ? (
+            <ScrollView style={styles.listScroll} contentContainerStyle={styles.listContent}>
+              <EnvsListSkeleton count={4} />
+            </ScrollView>
+          ) : filteredEnvs.length === 0 ? (
+            <View style={styles.emptyContainer}>
+              <Text style={styles.emptyIcon}>📦</Text>
+              <Text style={styles.emptyTitle}>
+                {activeFolderObj
+                  ? `No Variables in "${activeFolderObj.name}"`
+                  : selectedFolderId === 'root'
+                  ? 'No Unfiled Variables'
+                  : 'No Environment Variables'}
+              </Text>
+              <Text style={styles.emptyText}>
+                {activeFolderObj
+                  ? `Add your first key to "${activeFolderObj.name}" using the button below.`
+                  : `No variables found in this location.`}
+              </Text>
+              <TouchableOpacity
+                style={styles.emptyAddBtn}
+                onPress={() => openAdd(selectedFolderId === 'root' ? '' : selectedFolderId)}
+              >
+                <Text style={styles.emptyAddBtnText}>
+                  {activeFolderObj ? `+ Add Key to ${activeFolderObj.name}` : '+ Add Key'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <ScrollView style={styles.listScroll} contentContainerStyle={styles.listContent}>
+              {filteredEnvs.map(item => {
+                const isRevealed = revealedIds[item.id];
+                const displayValue = item.isSecret && !isRevealed ? '••••••••••••••••' : item.value;
+
+                return (
+                  <View key={item.id} style={styles.card}>
+                    <View style={styles.cardHeader}>
+                      <View style={styles.keyBadgeContainer}>
+                        <Text style={styles.keyName}>{item.key}</Text>
+                        {item.isSecret && (
+                          <View style={styles.secretTag}>
+                            <Text style={styles.secretTagText}>SECRET</Text>
+                          </View>
+                        )}
+                        {item.folderName && selectedFolderId === 'all' && (
+                          <View style={styles.folderTag}>
+                            <Text style={styles.folderTagText}>📁 {item.folderName}</Text>
+                          </View>
+                        )}
+                      </View>
+                      <View style={styles.cardActions}>
+                        {item.isSecret && (
+                          <TouchableOpacity
+                            style={styles.actionIconBtn}
+                            onPress={() => toggleReveal(item.id)}
+                          >
+                            <Text style={styles.actionIconText}>
+                              {isRevealed ? '🙈' : '👁️'}
+                            </Text>
+                          </TouchableOpacity>
+                        )}
+                        {canModify(item) && (
+                          <>
+                            <TouchableOpacity
+                              style={styles.actionIconBtn}
+                              onPress={() => openEdit(item)}
+                              accessibilityLabel="Edit variable"
+                            >
+                              <Text style={styles.actionIconText}>✏️</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              style={styles.actionIconBtn}
+                              onPress={() => handleDelete(item.id, item.key)}
+                              accessibilityLabel="Delete variable"
+                            >
+                              <Text style={styles.actionIconText}>🗑️</Text>
+                            </TouchableOpacity>
+                          </>
+                        )}
+                      </View>
+                    </View>
+
+                    {/* Value Box */}
+                    <View style={styles.valueBox}>
+                      <Text style={styles.valueText} numberOfLines={2}>
+                        {displayValue}
+                      </Text>
+                    </View>
+
+                    {item.comment ? (
+                      <Text style={styles.commentText}>💡 {item.comment}</Text>
+                    ) : null}
+
+                    <View style={styles.metaRow}>
+                      <Text style={styles.metaText}>By {item.createdBy}</Text>
+                      <Text style={styles.metaText}>
+                        {item.folderName ? `📁 ${item.folderName}` : 'Root Vault'}
+                      </Text>
+                    </View>
+                  </View>
+                );
+              })}
+            </ScrollView>
+          )}
+        </View>
+      )}
+
+      {/* Create / Edit Folder Modal */}
+      <Modal visible={folderModalVisible} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeaderRow}>
+              <Text style={styles.modalTitle}>
+                {editingFolderId ? '📁 Edit Folder' : '📁 Create New Folder'}
+              </Text>
+              <TouchableOpacity onPress={() => setFolderModalVisible(false)}>
+                <Ionicons name="close" size={20} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.modalSubtitle}>
+              {editingFolderId
+                ? 'Update this folder name and description.'
+                : 'Organize your environment variables hierarchically into folders.'}
+            </Text>
+
+            <Text style={styles.modalLabel}>Folder Name</Text>
+            <Controller
+              control={folderControl}
+              name="name"
+              rules={{
+                required: 'Folder name is required (e.g. Backend API, Stripe Config)',
+                minLength: { value: 2, message: 'Must be at least 2 characters' },
+              }}
+              render={({ field: { onChange, onBlur, value } }) => (
+                <TextInput
+                  style={[styles.modalInput, folderErrors.name && styles.inputError]}
+                  value={value}
+                  onChangeText={onChange}
+                  onBlur={onBlur}
+                  placeholder="e.g. Backend API, AWS Config"
+                  placeholderTextColor={COLORS.textMuted}
+                  autoFocus
+                />
+              )}
+            />
+            {folderErrors.name && (
+              <Text style={styles.errorText}>{folderErrors.name.message}</Text>
+            )}
+
+            <Text style={styles.modalLabel}>Description (Optional)</Text>
+            <Controller
+              control={folderControl}
+              name="description"
+              render={({ field: { onChange, onBlur, value } }) => (
+                <TextInput
+                  style={styles.modalInput}
+                  value={value}
+                  onChangeText={onChange}
+                  onBlur={onBlur}
+                  placeholder="e.g. Microservices, Payment Gateways"
+                  placeholderTextColor={COLORS.textMuted}
+                />
+              )}
+            />
+
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={styles.cancelBtn}
+                onPress={() => {
+                  setFolderModalVisible(false);
+                  resetFolderForm();
+                }}
+              >
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.saveBtnSecondary}
+                onPress={handleFolderSubmit(onSaveFolder)}
+                disabled={savingFolder}
+              >
+                {savingFolder ? (
+                  <ActivityIndicator color="#000" />
+                ) : (
+                  <Text style={styles.saveBtnText}>
+                    {editingFolderId ? 'Save Changes' : 'Create Folder'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Add / Edit Variable Modal */}
       <Modal visible={modalVisible} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>
-              {editingId ? 'Edit Variable' : 'Add New Variable'}
-            </Text>
+            <View style={styles.modalHeaderRow}>
+              <Text style={styles.modalTitle}>
+                {editingId ? 'Edit Variable' : 'Add New Variable'}
+              </Text>
+              <TouchableOpacity onPress={() => setModalVisible(false)}>
+                <Ionicons name="close" size={20} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
 
-            <Text style={styles.modalLabel}>Key Name</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={keyInput}
-              onChangeText={setKeyInput}
-              placeholder="e.g. DATABASE_URL"
-              placeholderTextColor={COLORS.textMuted}
-              autoCapitalize="characters"
+            {/* Folder Selection Picker */}
+            <Text style={styles.modalLabel}>Folder Location</Text>
+            <Controller
+              control={envControl}
+              name="folderId"
+              render={({ field: { onChange, value } }) => (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.folderPickerScroll}>
+                  <TouchableOpacity
+                    style={[styles.pickerChip, !value && styles.pickerChipActive]}
+                    onPress={() => onChange('')}
+                  >
+                    <Text style={[styles.pickerChipText, !value && styles.pickerChipTextActive]}>
+                      📄 Root / Unassigned
+                    </Text>
+                  </TouchableOpacity>
+                  {foldersList.map(f => (
+                    <TouchableOpacity
+                      key={f.id}
+                      style={[styles.pickerChip, value === f.id && styles.pickerChipActive]}
+                      onPress={() => onChange(f.id)}
+                    >
+                      <Text style={[styles.pickerChipText, value === f.id && styles.pickerChipTextActive]}>
+                        📁 {f.name}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )}
             />
 
+            <Text style={styles.modalLabel}>Key Name</Text>
+            <Controller
+              control={envControl}
+              name="key"
+              rules={{
+                required: 'Key name is required (e.g. DATABASE_URL)',
+              }}
+              render={({ field: { onChange, onBlur, value } }) => (
+                <TextInput
+                  style={[styles.modalInput, envErrors.key && styles.inputError]}
+                  value={value}
+                  onChangeText={onChange}
+                  onBlur={onBlur}
+                  placeholder="e.g. DATABASE_URL"
+                  placeholderTextColor={COLORS.textMuted}
+                  autoCapitalize="characters"
+                />
+              )}
+            />
+            {envErrors.key && (
+              <Text style={styles.errorText}>{envErrors.key.message}</Text>
+            )}
+
             <Text style={styles.modalLabel}>Secret Value</Text>
-            <TextInput
-              style={[styles.modalInput, styles.modalInputMulti]}
-              value={valueInput}
-              onChangeText={setValueInput}
-              placeholder="Enter variable value..."
-              placeholderTextColor={COLORS.textMuted}
-              multiline
+            <Controller
+              control={envControl}
+              name="value"
+              render={({ field: { onChange, onBlur, value } }) => (
+                <TextInput
+                  style={[styles.modalInput, styles.modalInputMulti]}
+                  value={value}
+                  onChangeText={onChange}
+                  onBlur={onBlur}
+                  placeholder="Enter variable value..."
+                  placeholderTextColor={COLORS.textMuted}
+                  multiline
+                />
+              )}
             />
 
             <Text style={styles.modalLabel}>Comment / Description</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={commentInput}
-              onChangeText={setCommentInput}
-              placeholder="Usage notes..."
-              placeholderTextColor={COLORS.textMuted}
+            <Controller
+              control={envControl}
+              name="comment"
+              render={({ field: { onChange, onBlur, value } }) => (
+                <TextInput
+                  style={styles.modalInput}
+                  value={value}
+                  onChangeText={onChange}
+                  onBlur={onBlur}
+                  placeholder="Usage notes..."
+                  placeholderTextColor={COLORS.textMuted}
+                />
+              )}
             />
 
-            <TouchableOpacity
-              style={styles.checkboxRow}
-              onPress={() => setIsSecretInput(!isSecretInput)}
-            >
-              <View style={[styles.checkbox, isSecretInput && styles.checkboxChecked]}>
-                {isSecretInput && <Text style={styles.checkmark}>✓</Text>}
-              </View>
-              <Text style={styles.checkboxLabel}>Mask as Sensitive Secret</Text>
-            </TouchableOpacity>
+            <Controller
+              control={envControl}
+              name="isSecret"
+              render={({ field: { onChange, value } }) => (
+                <TouchableOpacity
+                  style={styles.checkboxRow}
+                  onPress={() => onChange(!value)}
+                >
+                  <View style={[styles.checkbox, value && styles.checkboxChecked]}>
+                    {value && <Text style={styles.checkmark}>✓</Text>}
+                  </View>
+                  <Text style={styles.checkboxLabel}>Mask as Sensitive Secret</Text>
+                </TouchableOpacity>
+              )}
+            />
 
             <View style={styles.modalBtnRow}>
               <TouchableOpacity
@@ -369,7 +1406,7 @@ export function EnvVaultScreen({ token, workspaceId, teamId, apiBaseUrl }: EnvVa
 
               <TouchableOpacity
                 style={styles.saveBtn}
-                onPress={handleSaveEnv}
+                onPress={handleEnvSubmit(onSaveEnv)}
                 disabled={submitting}
               >
                 {submitting ? (
@@ -387,19 +1424,67 @@ export function EnvVaultScreen({ token, workspaceId, teamId, apiBaseUrl }: EnvVa
       <Modal visible={rawModalVisible} animationType="fade" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>📄 Raw .env Bulk Parser</Text>
+            <View style={styles.modalHeaderRow}>
+              <Text style={styles.modalTitle}>📄 Raw .env Bulk Parser</Text>
+              <TouchableOpacity onPress={() => setRawModalVisible(false)}>
+                <Ionicons name="close" size={20} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
             <Text style={styles.modalSubtitle}>
               Paste raw .env content below to bulk import into SQLite.
             </Text>
 
-            <TextInput
-              style={[styles.modalInput, { height: 160 }]}
-              value={rawDotEnv || formattedDotEnvExport}
-              onChangeText={setRawDotEnv}
-              placeholder={`KEY_1=value1\nKEY_2=value2`}
-              placeholderTextColor={COLORS.textMuted}
-              multiline
+            {/* Folder Target Picker for Bulk Import */}
+            <Text style={styles.modalLabel}>Import Into Folder</Text>
+            <Controller
+              control={rawControl}
+              name="folderId"
+              render={({ field: { onChange, value } }) => (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.folderPickerScroll}>
+                  <TouchableOpacity
+                    style={[styles.pickerChip, !value && styles.pickerChipActive]}
+                    onPress={() => onChange('')}
+                  >
+                    <Text style={[styles.pickerChipText, !value && styles.pickerChipTextActive]}>
+                      📄 Root / Unassigned
+                    </Text>
+                  </TouchableOpacity>
+                  {foldersList.map(f => (
+                    <TouchableOpacity
+                      key={f.id}
+                      style={[styles.pickerChip, value === f.id && styles.pickerChipActive]}
+                      onPress={() => onChange(f.id)}
+                    >
+                      <Text style={[styles.pickerChipText, value === f.id && styles.pickerChipTextActive]}>
+                        📁 {f.name}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )}
             />
+
+            <Controller
+              control={rawControl}
+              name="rawDotEnv"
+              rules={{
+                required: 'Raw .env text is required',
+              }}
+              render={({ field: { onChange, onBlur, value } }) => (
+                <TextInput
+                  style={[styles.modalInput, { height: 140 }, rawErrors.rawDotEnv && styles.inputError]}
+                  value={value}
+                  onChangeText={onChange}
+                  onBlur={onBlur}
+                  placeholder={`KEY_1=value1\nKEY_2=value2`}
+                  placeholderTextColor={COLORS.textMuted}
+                  multiline
+                />
+              )}
+            />
+            {rawErrors.rawDotEnv && (
+              <Text style={styles.errorText}>{rawErrors.rawDotEnv.message}</Text>
+            )}
 
             <View style={styles.modalBtnRow}>
               <TouchableOpacity
@@ -411,7 +1496,7 @@ export function EnvVaultScreen({ token, workspaceId, teamId, apiBaseUrl }: EnvVa
 
               <TouchableOpacity
                 style={styles.saveBtn}
-                onPress={handleImportBulk}
+                onPress={handleRawSubmit(onImportBulk)}
                 disabled={submitting}
               >
                 <Text style={styles.saveBtnText}>Import into Vault</Text>
@@ -420,6 +1505,12 @@ export function EnvVaultScreen({ token, workspaceId, teamId, apiBaseUrl }: EnvVa
           </View>
         </View>
       </Modal>
+
+      {/* In-App SQLite DB Inspector Modal */}
+      <SqliteInspectorModal
+        visible={sqliteModalVisible}
+        onClose={() => setSqliteModalVisible(false)}
+      />
     </View>
   );
 }
@@ -455,18 +1546,19 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '800',
   },
-  engineMeta: {
+  inspectLink: {
     color: COLORS.textMuted,
     fontSize: 11,
+    fontWeight: '600',
   },
   envTabsRow: {
     flexDirection: 'row',
-    backgroundColor: COLORS.surface,
+    backgroundColor: COLORS.card,
     borderRadius: 12,
     padding: 4,
+    marginBottom: 12,
     borderWidth: 1,
     borderColor: COLORS.border,
-    marginBottom: 12,
   },
   envTab: {
     flex: 1,
@@ -478,14 +1570,406 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   envTabText: {
-    fontSize: 11,
-    fontWeight: '800',
     color: COLORS.textMuted,
-    letterSpacing: 0.5,
+    fontSize: 12,
+    fontWeight: '700',
   },
   envTabTextActive: {
-    color: '#000000',
+    color: '#000',
+    fontWeight: '800',
   },
+
+  // Folders View Styles
+  foldersHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+    marginTop: 4,
+  },
+  foldersHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  sectionTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: COLORS.textMuted,
+    letterSpacing: 1,
+    marginRight: 8,
+  },
+  folderCountBadge: {
+    backgroundColor: COLORS.surface,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  folderCountText: {
+    color: COLORS.secondary,
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  sectionRefreshBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 6,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 8,
+  },
+  navRefreshBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 6,
+  },
+  newFolderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.secondaryGlow,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.secondary,
+  },
+  newFolderBtnText: {
+    color: COLORS.secondary,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  searchBarRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.card,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingHorizontal: 12,
+    marginBottom: 12,
+  },
+  searchIcon: {
+    marginRight: 8,
+  },
+  folderSearchInput: {
+    flex: 1,
+    paddingVertical: 9,
+    color: COLORS.text,
+    fontSize: 13,
+  },
+  foldersListContent: {
+    paddingBottom: 20,
+  },
+  folderCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: COLORS.card,
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  allEnvsCard: {
+    borderStyle: 'dashed',
+    borderColor: 'rgba(99, 102, 241, 0.4)',
+    marginTop: 4,
+  },
+  folderCardLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 10,
+  },
+  folderIconBox: {
+    width: 42,
+    height: 42,
+    borderRadius: 10,
+    backgroundColor: COLORS.secondaryGlow,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  folderIconText: {
+    fontSize: 20,
+  },
+  folderCardInfo: {
+    flex: 1,
+  },
+  folderCardTitle: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  folderCardDesc: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    marginBottom: 2,
+  },
+  folderCardMeta: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+  },
+  folderCardRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  cardCountBadge: {
+    backgroundColor: COLORS.surface,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  cardCountText: {
+    color: COLORS.secondary,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  folderActionBtnsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginLeft: 6,
+  },
+  folderCardEditBtn: {
+    padding: 6,
+    marginRight: 2,
+  },
+  folderCardDeleteBtn: {
+    padding: 6,
+  },
+  emptyFolderBox: {
+    backgroundColor: COLORS.card,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 24,
+    alignItems: 'center',
+    marginVertical: 12,
+  },
+  emptyFolderIcon: {
+    fontSize: 36,
+    marginBottom: 8,
+  },
+  emptyFolderTitle: {
+    color: COLORS.text,
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  emptyFolderText: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 18,
+    marginBottom: 16,
+    paddingHorizontal: 12,
+  },
+  createFolderPrimaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  createFolderPrimaryBtnText: {
+    color: '#000',
+    fontWeight: '800',
+    fontSize: 12,
+  },
+  foldersBottomActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+  },
+  actionPillBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.card,
+    borderRadius: 8,
+    paddingVertical: 10,
+    marginHorizontal: 3,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  actionPillText: {
+    color: COLORS.text,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+
+  // Breadcrumb Navigation Bar Styles
+  breadcrumbBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.card,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 10,
+  },
+  breadcrumbItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 2,
+    paddingHorizontal: 4,
+    borderRadius: 6,
+  },
+  breadcrumbLinkText: {
+    color: COLORS.primary,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  breadcrumbSeparator: {
+    marginHorizontal: 4,
+  },
+  breadcrumbCurrentItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 1,
+    maxWidth: 160,
+  },
+  breadcrumbCurrentIcon: {
+    fontSize: 13,
+    marginRight: 5,
+  },
+  breadcrumbCurrentText: {
+    color: COLORS.text,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  breadcrumbEnvBadge: {
+    backgroundColor: COLORS.surface,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  breadcrumbEnvText: {
+    color: COLORS.textMuted,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+
+  // Folder Details Card
+  folderDetailsCard: {
+    backgroundColor: 'rgba(6, 182, 212, 0.06)',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(6, 182, 212, 0.2)',
+  },
+  folderDetailsCardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  folderDetailsTitleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 8,
+  },
+  folderDetailsIcon: {
+    fontSize: 16,
+    marginRight: 6,
+  },
+  folderDetailsTitle: {
+    color: COLORS.text,
+    fontSize: 15,
+    fontWeight: '800',
+    marginRight: 8,
+    flexShrink: 1,
+  },
+  activeFolderBadge: {
+    backgroundColor: COLORS.secondary,
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  activeFolderBadgeText: {
+    color: '#000',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  folderDetailsDesc: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    marginTop: 6,
+    lineHeight: 16,
+  },
+  bannerFolderActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  bannerEditFolderBtn: {
+    padding: 6,
+    borderRadius: 6,
+    backgroundColor: 'rgba(6, 182, 212, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(6, 182, 212, 0.25)',
+  },
+  bannerDeleteFolderBtn: {
+    padding: 6,
+    borderRadius: 6,
+    backgroundColor: 'rgba(239, 68, 68, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.25)',
+  },
+
+  // Folder Picker in Modals
+  folderPickerScroll: {
+    flexDirection: 'row',
+    marginBottom: 12,
+  },
+  pickerChip: {
+    backgroundColor: COLORS.surface,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  pickerChipActive: {
+    backgroundColor: COLORS.secondaryGlow,
+    borderColor: COLORS.secondary,
+  },
+  pickerChipText: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  pickerChipTextActive: {
+    color: COLORS.secondary,
+    fontWeight: '700',
+  },
+
   actionRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -498,7 +1982,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingVertical: 9,
     color: COLORS.text,
     fontSize: 13,
     marginRight: 8,
@@ -511,56 +1995,75 @@ const styles = StyleSheet.create({
     marginRight: 6,
   },
   addBtnText: {
-    color: '#000000',
-    fontSize: 12,
+    color: '#000',
     fontWeight: '800',
+    fontSize: 12,
   },
   bulkBtn: {
     backgroundColor: COLORS.card,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: COLORS.secondary,
+    borderColor: COLORS.border,
     paddingHorizontal: 10,
-    paddingVertical: 10,
+    paddingVertical: 9,
+    marginRight: 6,
   },
   bulkBtnText: {
-    color: COLORS.secondary,
-    fontSize: 12,
+    color: COLORS.textSubtle,
     fontWeight: '700',
+    fontSize: 12,
+  },
+  dbInspectBtn: {
+    backgroundColor: COLORS.card,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.secondary,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
+  dbInspectBtnText: {
+    color: COLORS.secondary,
+    fontWeight: '800',
+    fontSize: 12,
   },
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    paddingVertical: 40,
   },
   loadingText: {
     color: COLORS.textMuted,
     marginTop: 12,
-    fontSize: 13,
   },
   emptyContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 32,
+    paddingVertical: 40,
+    backgroundColor: COLORS.card,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
   emptyIcon: {
-    fontSize: 48,
+    fontSize: 32,
     marginBottom: 12,
   },
   emptyTitle: {
     color: COLORS.text,
-    fontSize: 18,
-    fontWeight: '700',
+    fontSize: 16,
+    fontWeight: '800',
+    marginBottom: 6,
   },
   emptyText: {
     color: COLORS.textMuted,
-    fontSize: 13,
+    fontSize: 12,
     textAlign: 'center',
-    marginTop: 6,
+    maxWidth: 240,
+    marginBottom: 16,
   },
   emptyAddBtn: {
-    marginTop: 16,
     backgroundColor: COLORS.primary,
     borderRadius: 10,
     paddingHorizontal: 16,
@@ -568,7 +2071,8 @@ const styles = StyleSheet.create({
   },
   emptyAddBtnText: {
     color: '#000',
-    fontWeight: '700',
+    fontWeight: '800',
+    fontSize: 12,
   },
   listScroll: {
     flex: 1,
@@ -581,7 +2085,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     borderColor: COLORS.border,
-    padding: 14,
+    padding: 12,
     marginBottom: 10,
   },
   cardHeader: {
@@ -593,69 +2097,89 @@ const styles = StyleSheet.create({
   keyBadgeContainer: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'wrap',
     flex: 1,
   },
   keyName: {
-    color: COLORS.text,
+    color: COLORS.primary,
     fontSize: 15,
     fontWeight: '800',
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginRight: 8,
   },
   secretTag: {
-    backgroundColor: 'rgba(139, 92, 246, 0.2)',
+    backgroundColor: 'rgba(239, 68, 68, 0.15)',
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
     borderWidth: 1,
-    borderColor: COLORS.accent,
+    borderColor: COLORS.danger,
+    marginRight: 6,
   },
   secretTagText: {
-    color: COLORS.accent,
+    color: COLORS.danger,
+    fontSize: 9,
+    fontWeight: '800',
+  },
+  folderTag: {
+    backgroundColor: COLORS.secondaryGlow,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: COLORS.secondary,
+  },
+  folderTagText: {
+    color: COLORS.secondary,
     fontSize: 9,
     fontWeight: '800',
   },
   cardActions: {
     flexDirection: 'row',
-    alignItems: 'center',
   },
   actionIconBtn: {
     padding: 6,
     marginLeft: 4,
   },
   actionIconText: {
-    fontSize: 16,
+    fontSize: 14,
   },
   valueBox: {
-    backgroundColor: COLORS.inputBg,
+    backgroundColor: COLORS.surface,
     borderRadius: 8,
+    padding: 8,
     borderWidth: 1,
     borderColor: COLORS.border,
-    padding: 10,
     marginBottom: 6,
   },
   valueText: {
-    color: COLORS.primary,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    color: COLORS.textSubtle,
     fontSize: 13,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
   },
   commentText: {
     color: COLORS.textMuted,
-    fontSize: 12,
+    fontSize: 11,
+    fontStyle: 'italic',
     marginBottom: 6,
   },
   metaRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginTop: 4,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    paddingTop: 6,
+    marginTop: 2,
   },
   metaText: {
-    color: COLORS.borderLight,
+    color: COLORS.textMuted,
     fontSize: 10,
   },
+
+  // Modal Styles
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    backgroundColor: 'rgba(0, 0, 0, 0.85)',
     justifyContent: 'center',
     padding: 20,
   },
@@ -665,24 +2189,30 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     padding: 20,
+    maxHeight: '90%',
+  },
+  modalHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   modalTitle: {
     fontSize: 18,
     fontWeight: '800',
     color: COLORS.text,
-    marginBottom: 4,
   },
   modalSubtitle: {
     fontSize: 12,
     color: COLORS.textMuted,
-    marginBottom: 16,
+    marginTop: 2,
+    marginBottom: 14,
   },
   modalLabel: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
     color: COLORS.textSubtle,
-    marginBottom: 4,
-    marginTop: 10,
+    marginBottom: 6,
+    marginTop: 8,
   },
   modalInput: {
     backgroundColor: COLORS.inputBg,
@@ -693,6 +2223,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     color: COLORS.text,
     fontSize: 14,
+    marginBottom: 4,
   },
   modalInputMulti: {
     height: 70,
@@ -701,8 +2232,8 @@ const styles = StyleSheet.create({
   checkboxRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 14,
-    marginBottom: 10,
+    marginTop: 10,
+    marginBottom: 8,
   },
   checkbox: {
     width: 20,
@@ -752,8 +2283,24 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     alignItems: 'center',
   },
+  saveBtnSecondary: {
+    flex: 1,
+    backgroundColor: COLORS.secondary,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
   saveBtnText: {
     color: '#000',
     fontWeight: '800',
+  },
+  inputError: {
+    borderColor: COLORS.error,
+  },
+  errorText: {
+    color: COLORS.error,
+    fontSize: 11,
+    marginTop: -2,
+    marginBottom: 6,
   },
 });

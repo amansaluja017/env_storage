@@ -6,70 +6,175 @@ import {
   TextInput,
   TouchableOpacity,
   ActivityIndicator,
-  SafeAreaView,
   KeyboardAvoidingView,
   Platform,
+  Modal,
+  Linking,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useForm, Controller } from 'react-hook-form';
+import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '../theme';
+import { apiClient, setApiBaseUrl } from '../utils/apiClient';
+import { showCustomAlert } from '../components/CustomAlert';
+
+interface AuthFormData {
+  email: string;
+  password: string;
+  name?: string;
+}
 
 interface AuthScreenProps {
-  onLoginSuccess: (token: string, user: { id: string; email: string; name: string }) => void;
+  onLoginSuccess: (
+    accessToken: string,
+    refreshToken: string,
+    user: { id: string; email: string; name: string; role?: 'admin' | 'member' }
+  ) => void;
   apiBaseUrl: string;
 }
 
 export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
   const [isLogin, setIsLogin] = useState(true);
-  const [email, setEmail] = useState('alex@tubo.dev');
-  const [password, setPassword] = useState('password123');
-  const [name, setName] = useState('Alex Vance');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [pingStatus, setPingStatus] = useState<string>('Ping API Status');
+  const [pingColor, setPingColor] = useState<string>(COLORS.textMuted);
 
-  const handleAuth = async () => {
+  // Forgot password modal state
+  const [forgotPasswordModalOpen, setForgotPasswordModalOpen] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotSubmitting, setForgotSubmitting] = useState(false);
+  const {
+    control,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<AuthFormData>({
+    defaultValues: {
+      email: typeof __DEV__ !== 'undefined' && __DEV__ ? 'alex@tubo.dev' : '',
+      password: typeof __DEV__ !== 'undefined' && __DEV__ ? 'password123' : '',
+      name: typeof __DEV__ !== 'undefined' && __DEV__ ? 'Alex Vance' : '',
+    },
+  });
+
+  const onSubmit = async (formData: AuthFormData) => {
     setLoading(true);
     setErrorMsg('');
+    setApiBaseUrl(apiBaseUrl);
 
     try {
       const endpoint = isLogin ? '/trpc/auth.login' : '/trpc/auth.register';
       const bodyPayload = isLogin
-        ? { email, password }
-        : { email, password, name };
+        ? { email: formData.email.trim(), password: formData.password.trim() }
+        : {
+            email: formData.email.trim(),
+            password: formData.password.trim(),
+            name: (formData.name || '').trim(),
+          };
 
-      const response = await fetch(`${apiBaseUrl}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(bodyPayload),
-      });
+      const response = await apiClient.post(`${apiBaseUrl}${endpoint}`, bodyPayload);
+      const data = response.data;
 
-      const data = await response.json();
-
-      if (!response.ok || data.error) {
+      if (data.error) {
         throw new Error(data.error?.message || 'Authentication failed');
       }
 
-      const result = data.result?.data;
-      if (result?.token && result?.user) {
-        onLoginSuccess(result.token, result.user);
+      if (data.result && data.result.data) {
+        const payload = data.result.data;
+        const accessToken = payload.accessToken || payload.token;
+        const refreshToken = payload.refreshToken;
+        const userObj = payload.user;
+
+        if (!accessToken) {
+          throw new Error('No access token returned from authentication server');
+        }
+
+        onLoginSuccess(accessToken, refreshToken, userObj);
       } else {
-        throw new Error('Invalid authentication response');
+        throw new Error('Unexpected response format from auth service');
       }
     } catch (err: any) {
-      setErrorMsg(err.message || 'Network request failed. Is the API server running?');
+      console.error('Auth submit error:', err);
+      const msg = err.response?.data?.error?.message || err.message || 'Authentication failed';
+      setErrorMsg(msg);
+      showCustomAlert({
+        title: isLogin ? 'Sign In Failed' : 'Registration Failed',
+        message: msg,
+        type: 'danger',
+      });
     } finally {
       setLoading(false);
     }
   };
 
-  const handleQuickDemo = () => {
-    onLoginSuccess('demo_token_alex_123', {
-      id: 'user_demo_123',
-      email: 'alex@tubo.dev',
-      name: 'Alex Vance',
-    });
+  const handleForgotPasswordSubmit = async () => {
+    if (!forgotEmail.trim() || !forgotEmail.includes('@')) {
+      showCustomAlert({
+        title: 'Valid Email Required',
+        message: 'Please enter a valid email address to receive reset instructions.',
+        type: 'warning',
+      });
+      return;
+    }
+
+    setForgotSubmitting(true);
+    try {
+      const response = await apiClient.post(`${apiBaseUrl}/trpc/auth.requestPasswordReset`, {
+        email: forgotEmail.trim().toLowerCase(),
+      });
+
+      const data = response.data?.result?.data;
+      const previewUrl = data?.previewUrl;
+      setForgotPasswordModalOpen(false);
+      const targetEmail = forgotEmail;
+      setForgotEmail('');
+
+      showCustomAlert({
+        title: 'Password Reset Sent',
+        message: `If an account exists for ${targetEmail}, password reset instructions have been dispatched via email.`,
+        type: 'success',
+        buttons: previewUrl
+          ? [
+              { text: 'Close', style: 'cancel' },
+              {
+                text: 'Open Reset Portal',
+                style: 'default',
+                onPress: () => Linking.openURL(previewUrl),
+              },
+            ]
+          : [{ text: 'OK', style: 'default' }],
+      });
+    } catch (err: any) {
+      showCustomAlert({
+        title: 'Reset Error',
+        message: err.message || 'Unable to request password reset.',
+        type: 'danger',
+      });
+    } finally {
+      setForgotSubmitting(false);
+    }
+  };
+
+
+  const handlePing = async () => {
+    setPingStatus('Pinging...');
+    setPingColor(COLORS.textMuted);
+    try {
+      const res = await apiClient.get(`${apiBaseUrl}/health`, { timeout: 4000 });
+      if (res.status === 200) {
+        setPingStatus('API Online 🟢');
+        setPingColor(COLORS.primary);
+      } else {
+        setPingStatus('API Offline 🔴');
+        setPingColor(COLORS.danger);
+      }
+    } catch {
+      setPingStatus('API Offline 🔴');
+      setPingColor(COLORS.danger);
+    }
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.content}
@@ -97,52 +202,123 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
             </View>
           ) : null}
 
+          {/* Full Name Input (Register Only) */}
           {!isLogin && (
             <View style={styles.inputContainer}>
               <Text style={styles.label}>Full Name</Text>
-              <TextInput
-                style={styles.input}
-                value={name}
-                onChangeText={setName}
-                placeholder="e.g. Alex Vance"
-                placeholderTextColor={COLORS.textMuted}
+              <Controller
+                control={control}
+                name="name"
+                rules={{
+                  required: !isLogin ? 'Full name is required' : false,
+                  minLength: { value: 2, message: 'Name must be at least 2 characters' },
+                }}
+                render={({ field: { onChange, onBlur, value } }) => (
+                  <TextInput
+                    style={[styles.input, errors.name && styles.inputError]}
+                    value={value}
+                    onBlur={onBlur}
+                    onChangeText={onChange}
+                    placeholder="e.g. Alex Vance"
+                    placeholderTextColor={COLORS.textMuted}
+                  />
+                )}
               />
+              {errors.name && (
+                <Text style={styles.fieldErrorText}>{errors.name.message}</Text>
+              )}
             </View>
           )}
 
+          {/* Email Input */}
           <View style={styles.inputContainer}>
             <Text style={styles.label}>Email Address</Text>
-            <TextInput
-              style={styles.input}
-              value={email}
-              onChangeText={setEmail}
-              placeholder="name@company.com"
-              placeholderTextColor={COLORS.textMuted}
-              keyboardType="email-address"
-              autoCapitalize="none"
+            <Controller
+              control={control}
+              name="email"
+              rules={{
+                required: 'Email address is required',
+                pattern: {
+                  value: /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i,
+                  message: 'Invalid email address',
+                },
+              }}
+              render={({ field: { onChange, onBlur, value } }) => (
+                <TextInput
+                  style={[styles.input, errors.email && styles.inputError]}
+                  value={value}
+                  onBlur={onBlur}
+                  onChangeText={onChange}
+                  placeholder="name@company.com"
+                  placeholderTextColor={COLORS.textMuted}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+              )}
             />
+            {errors.email && (
+              <Text style={styles.fieldErrorText}>{errors.email.message}</Text>
+            )}
           </View>
 
+          {/* Password Input */}
           <View style={styles.inputContainer}>
             <Text style={styles.label}>Master Password</Text>
-            <TextInput
-              style={styles.input}
-              value={password}
-              onChangeText={setPassword}
-              placeholder="••••••••••••"
-              placeholderTextColor={COLORS.textMuted}
-              secureTextEntry
+            <Controller
+              control={control}
+              name="password"
+              rules={{
+                required: 'Password is required',
+                minLength: { value: 6, message: 'Password must be at least 6 characters' },
+              }}
+              render={({ field: { onChange, onBlur, value } }) => (
+                <TextInput
+                  style={[styles.input, errors.password && styles.inputError]}
+                  value={value}
+                  onBlur={onBlur}
+                  onChangeText={onChange}
+                  placeholder="••••••••••••"
+                  placeholderTextColor={COLORS.textMuted}
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+              )}
             />
+            {errors.password && (
+              <Text style={styles.fieldErrorText}>{errors.password.message}</Text>
+            )}
+
+            {/* Forgot Password Link (Login Mode) */}
+            {isLogin && (
+              <TouchableOpacity
+                style={styles.forgotBtn}
+                onPress={() => {
+                  setForgotEmail(control._formValues?.email || '');
+                  setForgotPasswordModalOpen(true);
+                }}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.forgotBtnText}>Forgot Password?</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
+          {/* Submit Button */}
           <TouchableOpacity
-            style={styles.primaryButton}
-            onPress={handleAuth}
+            style={[styles.primaryButton, loading && { opacity: 0.75 }]}
+            onPress={handleSubmit(onSubmit)}
             disabled={loading}
             activeOpacity={0.8}
           >
             {loading ? (
-              <ActivityIndicator color="#000" />
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <ActivityIndicator color="#000" size="small" style={{ marginRight: 8 }} />
+                <Text style={styles.primaryButtonText}>
+                  {isLogin ? 'Authenticating with Server...' : 'Creating Account...'}
+                </Text>
+              </View>
             ) : (
               <Text style={styles.primaryButtonText}>
                 {isLogin ? 'Sign In' : 'Create Account'}
@@ -150,6 +326,7 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
             )}
           </TouchableOpacity>
 
+          {/* Toggle Login/Register */}
           <TouchableOpacity
             style={styles.toggleButton}
             onPress={() => setIsLogin(!isLogin)}
@@ -161,20 +338,76 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
             </Text>
           </TouchableOpacity>
 
-          <View style={styles.divider}>
-            <View style={styles.dividerLine} />
-            <Text style={styles.dividerText}>DEMO MODE</Text>
-            <View style={styles.dividerLine} />
-          </View>
-
+          {/* Ping API Status */}
           <TouchableOpacity
-            style={styles.demoButton}
-            onPress={handleQuickDemo}
+            style={[styles.demoButton, { marginTop: 16, borderColor: pingColor }]}
+            onPress={handlePing}
             activeOpacity={0.8}
           >
-            <Text style={styles.demoButtonText}>⚡ Instant Demo Sign-In</Text>
+            <Text style={[styles.demoButtonText, { color: pingColor }]}>📡 {pingStatus}</Text>
           </TouchableOpacity>
+
+          <Text style={styles.urlIndicator}>Target: {apiBaseUrl}</Text>
         </View>
+
+        {/* Forgot Password Modal */}
+        <Modal
+          visible={forgotPasswordModalOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setForgotPasswordModalOpen(false)}
+        >
+          <KeyboardAvoidingView
+            style={styles.modalOverlay}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          >
+            <View style={styles.modalCard}>
+              <View style={styles.modalHeader}>
+                <View style={styles.modalTitleRow}>
+                  <Ionicons name="key-outline" size={18} color={COLORS.secondary} style={{ marginRight: 8 }} />
+                  <Text style={styles.modalTitle}>Reset Password</Text>
+                </View>
+                <TouchableOpacity
+                  style={styles.modalCloseBtn}
+                  onPress={() => setForgotPasswordModalOpen(false)}
+                >
+                  <Ionicons name="close" size={18} color={COLORS.textSubtle} />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.modalSubtitle}>
+                Enter your account email. We'll generate a secure reset token and send instructions to your inbox.
+              </Text>
+
+              <View style={{ marginBottom: 18 }}>
+                <Text style={styles.label}>Account Email</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="name@company.com"
+                  placeholderTextColor={COLORS.textMuted}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  value={forgotEmail}
+                  onChangeText={setForgotEmail}
+                />
+              </View>
+
+              <TouchableOpacity
+                style={[styles.primaryButton, forgotSubmitting && { opacity: 0.7 }]}
+                onPress={handleForgotPasswordSubmit}
+                disabled={forgotSubmitting}
+                activeOpacity={0.8}
+              >
+                {forgotSubmitting ? (
+                  <ActivityIndicator color="#000" size="small" />
+                ) : (
+                  <Text style={styles.primaryButtonText}>Send Reset Link</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -245,6 +478,11 @@ const styles = StyleSheet.create({
     color: COLORS.danger,
     fontSize: 13,
   },
+  fieldErrorText: {
+    color: COLORS.danger,
+    fontSize: 12,
+    marginTop: 4,
+  },
   inputContainer: {
     marginBottom: 16,
   },
@@ -263,6 +501,9 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     color: COLORS.text,
     fontSize: 15,
+  },
+  inputError: {
+    borderColor: COLORS.danger,
   },
   primaryButton: {
     backgroundColor: COLORS.primary,
@@ -284,23 +525,6 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontSize: 13,
   },
-  divider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginVertical: 20,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: COLORS.border,
-  },
-  dividerText: {
-    color: COLORS.textMuted,
-    fontSize: 11,
-    fontWeight: '700',
-    marginHorizontal: 10,
-    letterSpacing: 1,
-  },
   demoButton: {
     backgroundColor: COLORS.surface,
     borderWidth: 1,
@@ -312,6 +536,66 @@ const styles = StyleSheet.create({
   demoButtonText: {
     color: COLORS.secondary,
     fontSize: 14,
+    fontWeight: '700',
+  },
+  urlIndicator: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  modalCard: {
+    backgroundColor: '#121316',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 24,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  modalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: COLORS.text,
+  },
+  modalCloseBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalSubtitle: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 18,
+  },
+  forgotBtn: {
+    alignSelf: 'flex-end',
+    marginTop: 6,
+    paddingVertical: 4,
+  },
+  forgotBtnText: {
+    color: COLORS.secondary,
+    fontSize: 12,
     fontWeight: '700',
   },
 });

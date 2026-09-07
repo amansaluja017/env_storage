@@ -16,6 +16,7 @@ export const COLORS = {
   accent: '#8b5cf6', // Violet accent
   
   danger: '#ef4444',
+  error: '#ef4444',
   warning: '#f59e0b',
   
   text: '#ffffff',
