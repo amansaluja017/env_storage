@@ -8,7 +8,7 @@ import { appRouter } from './router.js';
 import { createContext, JWT_SECRET } from './context.js';
 import { tokenStore } from './storage/tokenStore.js';
 import { dataStore } from './storage/store.js';
-import { pgDb, users, eq } from '@tubo/db';
+import { pgDb, users, eq, pgPool } from '@tubo/db';
 import {
   renderEmailVerifiedPage,
   renderResetPasswordPortal,
@@ -16,7 +16,6 @@ import {
   renderAcceptInviteSetupPasswordPage,
   renderInviteSuccessPage,
 } from './views/webAuthPages.js';
-import { seedInitialData } from './seed.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -388,20 +387,24 @@ app.get('/api/export/envs.zip', async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    service: 'Tubo API Server',
+    service: 'Env Vault API Server',
     trpc: '/trpc',
     timestamp: new Date().toISOString(),
   });
 });
 
-// Seed and verify initial accounts & admin role on launch
-seedInitialData()
-  .then(() => dataStore.ensureSensitiveEnvsEncrypted())
+// Ensure sensitive envs encrypted & ensure migrations on launch
+dataStore.ensureSensitiveEnvsEncrypted()
+  .then(async () => {
+    try {
+      await pgPool.query('ALTER TABLE team_invites ALTER COLUMN invite_code TYPE text;');
+    } catch {}
+  })
   .catch(err => {
-    console.error('Error during initial seed verification:', err);
+    console.error('Error during startup initialization:', err);
   });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Tubo Express + tRPC Server running on http://localhost:${PORT}`);
+  console.log(`🚀 Env Vault Express + tRPC Server running on http://localhost:${PORT}`);
   console.log(`⚡ tRPC Endpoint: http://localhost:${PORT}/trpc (Auth, Workspace, Team, Folder, Env)`);
 });

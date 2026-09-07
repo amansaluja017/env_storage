@@ -3,6 +3,7 @@ import { router, protectedProcedure } from '../trpc.js';
 import { dataStore } from '../storage/store.js';
 import { TRPCError } from '@trpc/server';
 import { sendTeamInvitationEmail, getPublicBaseUrl } from '../services/emailService.js';
+import { pgDb, teamInvites, users, eq, and } from '@tubo/db';
 
 export const teamRouter = router({
   list: protectedProcedure
@@ -15,12 +16,21 @@ export const teamRouter = router({
   create: protectedProcedure
     .input(
       z.object({
-        workspaceId: z.string(),
-        name: z.string().min(2),
+        workspaceId: z.string().min(1, 'Workspace ID is required'),
+        name: z.string().min(2, 'Team name must be at least 2 characters'),
         description: z.string().optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
+      // Validate that workspace exists before allowing team creation
+      const ws = await dataStore.getWorkspaceById(input.workspaceId);
+      if (!ws) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'Workspace not found. You must create a workspace before creating a team.',
+        });
+      }
+
       // Permission check: only workspace admins can create teams
       const isAllowed = await dataStore.isWorkspaceAdmin(input.workspaceId, ctx.user.id);
       if (!isAllowed) {
@@ -81,11 +91,60 @@ export const teamRouter = router({
       }
 
       const ws = await dataStore.getWorkspaceById(input.workspaceId);
+      const targetEmail = input.email.toLowerCase().trim();
+
+      // 1. Check if user already exists and is already a member of this team
+      const existingUser = await pgDb
+        .select()
+        .from(users)
+        .where(eq(users.email, targetEmail));
+
+      if (existingUser.length > 0) {
+        const isAlreadyMember = await dataStore.isUserInTeam(input.teamId, existingUser[0].id);
+        if (isAlreadyMember) {
+          throw new TRPCError({
+            code: 'CONFLICT',
+            message: `${targetEmail} is already a member of this team.`,
+          });
+        }
+      }
+
+      // 2. Check if an active pending invitation has already been sent to this user for this team
+      const pendingInvites = await pgDb
+        .select()
+        .from(teamInvites)
+        .where(
+          and(
+            eq(teamInvites.teamId, input.teamId),
+            eq(teamInvites.email, targetEmail),
+            eq(teamInvites.status, 'pending')
+          )
+        );
+
+      if (pendingInvites.length > 0) {
+        const activeInvite = pendingInvites[0];
+        const now = new Date();
+        const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+
+        // If the pending invite was created within the last 1 hour, it is still active and valid
+        if (activeInvite.createdAt > oneHourAgo) {
+          throw new TRPCError({
+            code: 'CONFLICT',
+            message: `An active invitation has already been sent to ${targetEmail} for this team. You can copy the invite link from the invites list below.`,
+          });
+        }
+
+        // If the pending invite is older than 1 hour, expire it cleanly so a fresh invite can be created
+        await pgDb
+          .update(teamInvites)
+          .set({ status: 'expired' })
+          .where(eq(teamInvites.id, activeInvite.id));
+      }
 
       const invite = await dataStore.createInvite({
         teamId: input.teamId,
         workspaceId: input.workspaceId,
-        email: input.email.toLowerCase().trim(),
+        email: targetEmail,
         role: input.role,
         invitedBy: ctx.user.id,
       });
@@ -94,7 +153,7 @@ export const teamRouter = router({
       const inviteUrl = `${apiHost}/auth/accept-invite?token=${invite.inviteCode}`;
 
       await sendTeamInvitationEmail(
-        input.email.toLowerCase().trim(),
+        targetEmail,
         inviteUrl,
         team?.name || 'Team',
         ws?.name || 'Workspace',

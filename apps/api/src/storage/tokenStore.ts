@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { pgDb, tokens, eq, and, gt, isNull, TokenType } from '@tubo/db';
+import { pgDb, tokens, eq, and, or, gt, isNull, TokenType } from '@tubo/db';
 
 export type { TokenType };
 
@@ -14,16 +14,61 @@ export interface TokenRecord {
   createdAt: Date;
 }
 
+const VAULT_MASTER_KEY =
+  process.env.VAULT_ENCRYPTION_KEY ||
+  process.env.EXPO_PUBLIC_VAULT_KEY ||
+  process.env.JWT_SECRET ||
+  'tubo_vault_master_aes_key_2026';
+
+const derivedKey = crypto.scryptSync(VAULT_MASTER_KEY, 'tubo_token_salt_v1', 32);
+
 /**
- * Creates a SHA-256 hash digest of a raw token string for secure persistence and lookup
+ * Creates a SHA-256 hash digest of a raw token string (retained for backwards compatibility)
  */
 export function hashToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+/**
+ * Encrypts a token deterministically with AES-256-GCM so it is stored encrypted at rest in PostgreSQL
+ */
+export function encryptToken(token: string): string {
+  if (!token) return '';
+  if (token.startsWith('enc:')) return token;
+  const iv = crypto.createHmac('sha256', derivedKey).update(token).digest().subarray(0, 12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', derivedKey, iv);
+  let encrypted = cipher.update(token, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  const tag = cipher.getAuthTag().toString('hex');
+  return `enc:${iv.toString('hex')}:${tag}:${encrypted}`;
+}
+
+/**
+ * Decrypts an AES-256-GCM encrypted token.
+ * If the string is not encrypted (e.g. legacy plain/hash token), returns it as-is.
+ */
+export function decryptToken(encryptedStr: string): string {
+  if (!encryptedStr || typeof encryptedStr !== 'string') return encryptedStr;
+  if (!encryptedStr.startsWith('enc:')) return encryptedStr;
+  const parts = encryptedStr.split(':');
+  if (parts.length !== 4) return encryptedStr;
+  try {
+    const iv = Buffer.from(parts[1], 'hex');
+    const tag = Buffer.from(parts[2], 'hex');
+    const ciphertext = parts[3];
+    const decipher = crypto.createDecipheriv('aes-256-gcm', derivedKey, iv);
+    decipher.setAuthTag(tag);
+    let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  } catch {
+    return encryptedStr;
+  }
+}
+
 export const tokenStore = {
   /**
-   * Persist a token record strictly in PostgreSQL database using SHA-256 hash
+   * Persist a token record strictly in PostgreSQL database encrypted with AES-256-GCM
    */
   async createToken(params: {
     userId?: string | null;
@@ -40,7 +85,7 @@ export const tokenStore = {
         ? JSON.stringify(params.metadata)
         : params.metadata || null;
 
-    const hashedToken = hashToken(params.token);
+    const storedToken = encryptToken(params.token);
 
     const record: TokenRecord = {
       id,
@@ -56,7 +101,7 @@ export const tokenStore = {
     await pgDb.insert(tokens).values({
       id: record.id,
       userId: record.userId,
-      token: hashedToken, // Stored as SHA-256 hash digest in PostgreSQL
+      token: storedToken, // Stored encrypted in PostgreSQL
       type: record.type,
       expiresAt: record.expiresAt,
       consumedAt: null,
@@ -69,12 +114,13 @@ export const tokenStore = {
 
   /**
    * Find a token record strictly in PostgreSQL:
-   * - Matching the SHA-256 hashed token string
+   * - Matching AES-256-GCM encrypted token, SHA-256 hash, or direct string
    * - Matching the token type
    * - Not yet consumed (consumedAt is null)
    * - Not expired (expiresAt > now)
    */
   async findValidToken(tokenString: string, type: TokenType): Promise<TokenRecord | null> {
+    const enc = encryptToken(tokenString);
     const hashed = hashToken(tokenString);
     const now = new Date();
 
@@ -83,7 +129,11 @@ export const tokenStore = {
       .from(tokens)
       .where(
         and(
-          eq(tokens.token, hashed),
+          or(
+            eq(tokens.token, enc),
+            eq(tokens.token, hashed),
+            eq(tokens.token, tokenString)
+          ),
           eq(tokens.type, type),
           isNull(tokens.consumedAt),
           gt(tokens.expiresAt, now)
@@ -113,13 +163,24 @@ export const tokenStore = {
    * false if the token was already consumed or non-existent.
    */
   async consumeToken(tokenString: string, type: TokenType): Promise<boolean> {
+    const enc = encryptToken(tokenString);
     const hashed = hashToken(tokenString);
     const now = new Date();
 
     const result = await pgDb
       .update(tokens)
       .set({ consumedAt: now })
-      .where(and(eq(tokens.token, hashed), eq(tokens.type, type), isNull(tokens.consumedAt)));
+      .where(
+        and(
+          or(
+            eq(tokens.token, enc),
+            eq(tokens.token, hashed),
+            eq(tokens.token, tokenString)
+          ),
+          eq(tokens.type, type),
+          isNull(tokens.consumedAt)
+        )
+      );
 
     return (result.rowCount ?? 0) > 0;
   },

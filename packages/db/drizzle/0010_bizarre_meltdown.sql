@@ -1,0 +1,1 @@
+ALTER TABLE "team_invites" ALTER COLUMN "invite_code" SET DATA TYPE text;

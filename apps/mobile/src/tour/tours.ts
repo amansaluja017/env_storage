@@ -4,7 +4,8 @@ import { shouldUseSecureStore } from '../storage/secureStorage';
 import { COLORS } from '../theme';
 import { TourTooltip } from './TourTooltip';
 
-const TOUR_STORAGE_PREFIX = 'tubo_guideway_seen_';
+const TOUR_STORAGE_PREFIX = 'env_guideway_seen_';
+const LEGACY_TOUR_STORAGE_PREFIX = 'tubo_guideway_seen_';
 const memoryTourStore: Record<string, string> = {};
 
 /**
@@ -52,7 +53,8 @@ export const tourStorage: TourStorage = {
  */
 export async function hasSeenTour(tourId: string, userId?: string): Promise<boolean> {
   const key = `${TOUR_STORAGE_PREFIX}${userId ? `${userId}_` : ''}${tourId}`;
-  const value = await tourStorage.getItem(key);
+  const legacyKey = `${LEGACY_TOUR_STORAGE_PREFIX}${userId ? `${userId}_` : ''}${tourId}`;
+  const value = (await tourStorage.getItem(key)) || (await tourStorage.getItem(legacyKey));
   return value === 'true';
 }
 
@@ -75,7 +77,7 @@ export async function resetTourSeen(tourId: string, userId?: string): Promise<vo
 }
 
 /**
- * Guideway Theme Configuration tailored for Tubo's high-tech dark theme
+ * Guideway Theme Configuration tailored for Env Vault's high-tech dark theme
  */
 export const guidewayTheme: ThemeOverride = {
   overlayColor: 'rgba(5, 8, 15, 0.82)',
@@ -144,6 +146,14 @@ export const WELCOME_TOUR: TourDefinition = {
       cutout: { shape: 'rounded', radius: 10, padding: 8 },
     },
     {
+      id: 'tour-footer-dock',
+      title: 'Bottom Action Dock',
+      body: 'Your core actions live at the bottom dock: Add secret keys, create folders, import .env files, or backup your vault anytime.',
+      render: TourTooltip,
+      placement: 'top',
+      cutout: { shape: 'rounded', radius: 14, padding: 8 },
+    },
+    {
       id: 'tour-user-avatar',
       title: 'Profile & Security',
       body: 'Tap your avatar to access account settings, security logs, redeem voucher codes, or sign out.',
@@ -169,14 +179,6 @@ export const VAULT_TOUR: TourDefinition = {
       cutout: { shape: 'rounded', radius: 12, padding: 6 },
     },
     {
-      id: 'tour-sqlite-badge',
-      title: 'Offline SQLite Engine',
-      body: 'Your secrets are securely cached in local SQLite for instant decryption and offline reliability. Tap here to inspect raw SQLite data.',
-      render: TourTooltip,
-      placement: 'bottom',
-      cutout: { shape: 'rounded', radius: 8, padding: 6 },
-    },
-    {
       id: 'tour-env-tabs',
       title: 'Environment Switcher',
       body: 'Isolate your secrets by environment: Development, Staging, or Production. Tap any tab to filter secrets.',
@@ -199,6 +201,46 @@ export const VAULT_TOUR: TourDefinition = {
       render: TourTooltip,
       placement: 'bottom',
       cutout: { shape: 'rounded', radius: 8, padding: 6 },
+    },
+    {
+      id: 'tour-footer-dock',
+      title: 'Quick Actions Dock',
+      body: 'Your bottom dock provides one-tap access to primary secret management tools across all environments.',
+      render: TourTooltip,
+      placement: 'top',
+      cutout: { shape: 'rounded', radius: 14, padding: 8 },
+    },
+    {
+      id: 'tour-footer-add-key',
+      title: 'Add Key',
+      body: 'Encrypt and store a new environment variable. Configure key names, secret values, helpful comments, and visibility options.',
+      render: TourTooltip,
+      placement: 'top',
+      cutout: { shape: 'rounded', radius: 12, padding: 6 },
+    },
+    {
+      id: 'tour-footer-new-folder',
+      title: 'New Folder',
+      body: 'Group environment variables into dedicated folders by service, database, or API tier to prevent clutter.',
+      render: TourTooltip,
+      placement: 'top',
+      cutout: { shape: 'rounded', radius: 12, padding: 6 },
+    },
+    {
+      id: 'tour-footer-import-env',
+      title: 'Import .env',
+      body: 'Batch import environment variables! Simply paste your .env file to automatically parse and securely encrypt all keys.',
+      render: TourTooltip,
+      placement: 'top',
+      cutout: { shape: 'rounded', radius: 12, padding: 6 },
+    },
+    {
+      id: 'tour-footer-backup',
+      title: 'Backup Vault',
+      body: 'Export your encrypted environments into a secure, downloadable ZIP file for offline backups and migration.',
+      render: TourTooltip,
+      placement: 'top',
+      cutout: { shape: 'rounded', radius: 12, padding: 6 },
     },
     {
       id: 'tour-start-tour-btn',

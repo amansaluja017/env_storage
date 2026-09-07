@@ -83,8 +83,8 @@ function visualWidth(str) {
 
 function printHelp() {
   console.log(`
-${c.bold}${c.cyan}TUBO MOBILE SQLITE DB INSPECTOR${c.reset}
-${c.gray}View, query, and inspect the SQLite database data for Tubo Mobile.${c.reset}
+${c.bold}${c.cyan}ENV VAULT MOBILE SQLITE DB INSPECTOR${c.reset}
+${c.gray}View, query, and inspect the SQLite database data for Env Vault Mobile.${c.reset}
 
 ${c.bold}USAGE:${c.reset}
   npm run db:view [options]
@@ -184,7 +184,8 @@ function tryPullFromAdb(targetPath) {
 
     const candidates = [
       'host.exp.exponent', // Expo Go
-      'com.tubo.envvault',  // Dev client / Standalone
+      'com.dreamvisaimmigration001.envvault', // Dev client / Standalone Env Vault
+      'com.tubo.envvault',  // Legacy Dev client / Standalone
     ];
 
     for (const pkg of candidates) {
@@ -435,7 +436,7 @@ function main() {
   }
 
   // Header Banner
-  console.log(`\n${c.bold}${c.cyan}TUBO MOBILE SQLITE DATABASE INSPECTOR${c.reset}`);
+  console.log(`\n${c.bold}${c.cyan}ENV VAULT MOBILE SQLITE DATABASE INSPECTOR${c.reset}`);
   console.log(`${c.gray}${'═'.repeat(65)}${c.reset}`);
   console.log(`  ${c.bold}Database File:${c.reset}   ${c.green}${dbPath}${c.reset}`);
   console.log(`  ${c.bold}File Size:${c.reset}       ${(stats.size / 1024).toFixed(2)} KB`);

@@ -304,7 +304,7 @@ export async function sendEmailVerificationEmail(
   toEmail: string,
   verifyUrl: string
 ): Promise<{ success: boolean; previewUrl?: string; error?: string }> {
-  const subject = 'Verify your new Tubo account email';
+  const subject = 'Verify your new Env Vault account email';
   const htmlContent = `
     <!DOCTYPE html>
     <html>
@@ -323,10 +323,10 @@ export async function sendEmailVerificationEmail(
       </head>
       <body>
         <div class="container">
-          <div class="badge">TUBO VAULT • SECURITY</div>
+          <div class="badge">ENV VAULT • SECURITY</div>
           <h1>Verify Your New Email Address</h1>
           <p>
-            You requested to change your account email on Tubo Vault to <strong>${toEmail}</strong>.<br/>
+            You requested to change your account email on Env Vault to <strong>${toEmail}</strong>.<br/>
             Please click the button below to confirm this change and activate your new email address.
           </p>
           <div style="text-align: center; margin: 30px 0;">
@@ -349,7 +349,7 @@ export async function sendEmailVerificationEmail(
     toEmail,
     subject,
     htmlContent,
-    fromName: 'Tubo Vault Security',
+    fromName: 'Env Vault Security',
     previewUrl: verifyUrl,
   });
 }
@@ -361,7 +361,7 @@ export async function sendPasswordResetEmail(
   toEmail: string,
   resetUrl: string
 ): Promise<{ success: boolean; previewUrl?: string; error?: string }> {
-  const subject = 'Reset your Tubo account password';
+  const subject = 'Reset your Env Vault account password';
   const htmlContent = `
     <!DOCTYPE html>
     <html>
@@ -380,10 +380,10 @@ export async function sendPasswordResetEmail(
       </head>
       <body>
         <div class="container">
-          <div class="badge">TUBO VAULT • ACCOUNT RECOVERY</div>
+          <div class="badge">ENV VAULT • ACCOUNT RECOVERY</div>
           <h1>Password Reset Request</h1>
           <p>
-            We received a request to reset the password for your Tubo Vault account.
+            We received a request to reset the password for your Env Vault account.
             Click the button below to open the secure web portal and enter your new password.
           </p>
           <div style="text-align: center; margin: 30px 0;">
@@ -395,7 +395,7 @@ export async function sendPasswordResetEmail(
             Direct Link: <a href="${resetUrl}" class="raw-link">${resetUrl}</a>
           </p>
           <div class="footer">
-            Tubo Vault • Secure Environment & Secret Storage
+            Env Vault • Secure Environment & Secret Storage
           </div>
         </div>
       </body>
@@ -406,7 +406,7 @@ export async function sendPasswordResetEmail(
     toEmail,
     subject,
     htmlContent,
-    fromName: 'Tubo Vault Security',
+    fromName: 'Env Vault Security',
     previewUrl: resetUrl,
   });
 }
@@ -425,7 +425,7 @@ export async function sendTeamInvitationEmail(
   const safeWorkspaceName = escapeHtml(workspaceName);
   const safeInviterName = inviterName ? escapeHtml(inviterName) : undefined;
 
-  const subject = `${safeInviterName ? `${safeInviterName} invited you` : "You've been invited"} to join ${safeTeamName} on Tubo Vault`;
+  const subject = `${safeInviterName ? `${safeInviterName} invited you` : "You've been invited"} to join ${safeTeamName} on Env Vault`;
   const htmlContent = `
     <!DOCTYPE html>
     <html>
@@ -448,10 +448,10 @@ export async function sendTeamInvitationEmail(
       </head>
       <body>
         <div class="container">
-          <div class="badge">TUBO VAULT • TEAM INVITATION</div>
+          <div class="badge">ENV VAULT • TEAM INVITATION</div>
           <h1>Join ${safeTeamName}</h1>
           <p>
-            ${safeInviterName ? `<strong>${safeInviterName}</strong> has` : 'You have been'} invited to collaborate on secrets and environment variables in Tubo Vault.
+            ${safeInviterName ? `<strong>${safeInviterName}</strong> has` : 'You have been'} invited to collaborate on secrets and environment variables in Env Vault.
           </p>
           <div class="team-box">
             <div class="team-name">📁 ${safeTeamName}</div>
@@ -478,7 +478,7 @@ export async function sendTeamInvitationEmail(
     toEmail,
     subject,
     htmlContent,
-    fromName: 'Tubo Vault',
+    fromName: 'Env Vault',
     previewUrl: inviteUrl,
   });
 }
@@ -496,9 +496,9 @@ export async function testEmailDelivery(testToEmail: string): Promise<{ success:
 
   const result = await sendEmail({
     toEmail: testToEmail,
-    subject: 'Tubo Vault Email Delivery Test',
-    htmlContent: '<p>This is a test email from Tubo Vault to confirm production email delivery.</p>',
-    fromName: 'Tubo Vault System',
+    subject: 'Env Vault Email Delivery Test',
+    htmlContent: '<p>This is a test email from Env Vault to confirm production email delivery.</p>',
+    fromName: 'Env Vault System',
   });
 
   return {

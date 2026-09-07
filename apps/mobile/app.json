@@ -2,6 +2,7 @@
   "expo": {
     "name": "Env Vault",
     "slug": "env-vault",
+    "scheme": ["envvault", "tubovault"],
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",

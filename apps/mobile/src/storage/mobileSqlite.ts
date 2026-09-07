@@ -1,9 +1,10 @@
 import * as SQLite from 'expo-sqlite';
 import { drizzle, ExpoSQLiteDatabase } from 'drizzle-orm/expo-sqlite';
 import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
-import { eq, and, or, like, desc, asc, sql, isNull, notInArray } from 'drizzle-orm';
+import { eq, and, or, like, desc, asc, sql, isNull, notInArray, inArray } from 'drizzle-orm';
 import JSZip from 'jszip';
 import { Platform } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
 import * as FileSystemLegacy from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { apiClient } from '../utils/apiClient';
@@ -26,6 +27,7 @@ export const folders = sqliteTable('folders', {
   createdById: text('created_by_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+  syncStatus: text('sync_status').$type<'synced' | 'pending_create' | 'pending_update' | 'pending_delete'>().default('synced').notNull(),
 });
 
 export const envs = sqliteTable('envs', {
@@ -42,6 +44,20 @@ export const envs = sqliteTable('envs', {
   createdById: text('created_by_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
+  syncStatus: text('sync_status').$type<'synced' | 'pending_create' | 'pending_update' | 'pending_delete'>().default('synced').notNull(),
+});
+
+export const syncQueue = sqliteTable('sync_queue', {
+  id: text('id').primaryKey(),
+  entityType: text('entity_type').$type<'folder' | 'env'>().notNull(),
+  entityId: text('entity_id').notNull(),
+  action: text('action').$type<'create' | 'update' | 'delete' | 'bulk_import'>().notNull(),
+  payload: text('payload').notNull(),
+  status: text('status').$type<'pending' | 'syncing' | 'failed'>().default('pending').notNull(),
+  retryCount: integer('retry_count').default(0).notNull(),
+  lastError: text('last_error'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
 });
 
 export interface FolderItem {
@@ -56,6 +72,7 @@ export interface FolderItem {
   createdAt: string;
   updatedAt: string;
   envCount?: number;
+  syncStatus?: 'synced' | 'pending_create' | 'pending_update' | 'pending_delete';
 }
 
 export interface EnvItem {
@@ -71,6 +88,20 @@ export interface EnvItem {
   comment?: string;
   createdBy: string;
   createdById?: string;
+  createdAt: string;
+  updatedAt: string;
+  syncStatus?: 'synced' | 'pending_create' | 'pending_update' | 'pending_delete';
+}
+
+export interface SyncQueueItem {
+  id: string;
+  entityType: 'folder' | 'env';
+  entityId: string;
+  action: 'create' | 'update' | 'delete' | 'bulk_import';
+  payload: string;
+  status: 'pending' | 'syncing' | 'failed';
+  retryCount: number;
+  lastError?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -89,7 +120,11 @@ export function generateUuid(): string {
 }
 
 let expoDbInstance: SQLite.SQLiteDatabase | null = null;
-let drizzleDb: ExpoSQLiteDatabase<{ folders: typeof folders; envs: typeof envs }> | null = null;
+let drizzleDb: ExpoSQLiteDatabase<{
+  folders: typeof folders;
+  envs: typeof envs;
+  syncQueue: typeof syncQueue;
+}> | null = null;
 let initPromise: Promise<void> | null = null;
 
 /**
@@ -123,7 +158,8 @@ export async function initMobileSqlite(): Promise<void> {
           created_by TEXT NOT NULL DEFAULT 'Unknown',
           created_by_id TEXT,
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
-          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          sync_status TEXT NOT NULL DEFAULT 'synced'
         );
 
         CREATE TABLE IF NOT EXISTS envs (
@@ -138,6 +174,20 @@ export async function initMobileSqlite(): Promise<void> {
           comment TEXT,
           created_by TEXT NOT NULL DEFAULT 'Unknown',
           created_by_id TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          sync_status TEXT NOT NULL DEFAULT 'synced'
+        );
+
+        CREATE TABLE IF NOT EXISTS sync_queue (
+          id TEXT PRIMARY KEY NOT NULL,
+          entity_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          action TEXT NOT NULL,
+          payload TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          retry_count INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT,
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -162,6 +212,9 @@ export async function initMobileSqlite(): Promise<void> {
         if (!colNames.has('comment')) {
           await db.execAsync('ALTER TABLE envs ADD COLUMN comment TEXT;');
         }
+        if (!colNames.has('sync_status')) {
+          await db.execAsync("ALTER TABLE envs ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced';");
+        }
       } catch (migErr) {
         console.log('Notice on envs column migration:', migErr);
       }
@@ -178,6 +231,9 @@ export async function initMobileSqlite(): Promise<void> {
         if (!folderColNames.has('description')) {
           await db.execAsync('ALTER TABLE folders ADD COLUMN description TEXT;');
         }
+        if (!folderColNames.has('sync_status')) {
+          await db.execAsync("ALTER TABLE folders ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced';");
+        }
       } catch (migErr) {
         console.log('Notice on folders column migration:', migErr);
       }
@@ -188,6 +244,7 @@ export async function initMobileSqlite(): Promise<void> {
         'CREATE INDEX IF NOT EXISTS idx_envs_team ON envs (workspace_id, team_id, environment);',
         'CREATE INDEX IF NOT EXISTS idx_envs_folder ON envs (folder_id);',
         'CREATE INDEX IF NOT EXISTS idx_envs_key ON envs (key);',
+        'CREATE INDEX IF NOT EXISTS idx_sync_queue_status ON sync_queue (status);',
       ];
       for (const idxQuery of indexQueries) {
         try {
@@ -198,7 +255,7 @@ export async function initMobileSqlite(): Promise<void> {
       }
 
       // 4. Initialize Drizzle ORM on top of the persistent SQLite database
-      drizzleDb = drizzle(db, { schema: { folders, envs } });
+      drizzleDb = drizzle(db, { schema: { folders, envs, syncQueue } });
 
       // 5. Ensure any sensitive environment variables in SQLite are encrypted (never stored dry)
       try {
@@ -225,6 +282,27 @@ export async function initMobileSqlite(): Promise<void> {
       } catch {
         // ignore
       }
+
+      // 7. Clear all SQLite tables as requested
+      try {
+        let cleared = false;
+        if (Platform.OS !== 'web') {
+          const val = await SecureStore.getItemAsync('sqlite_cleared_user_request_v1');
+          cleared = val === 'true';
+        }
+        if (!cleared) {
+          await db.execAsync(`
+            DELETE FROM sync_queue;
+            DELETE FROM envs;
+            DELETE FROM folders;
+          `);
+          if (Platform.OS !== 'web') {
+            await SecureStore.setItemAsync('sqlite_cleared_user_request_v1', 'true');
+          }
+        }
+      } catch (err) {
+        console.warn('Notice on clearing SQLite tables:', err);
+      }
     } catch (err) {
       console.error('Error opening persistent mobile SQLite database:', err);
       initPromise = null;
@@ -236,11 +314,27 @@ export async function initMobileSqlite(): Promise<void> {
 }
 
 /**
+ * Clear all records from all tables in persistent SQLite database
+ */
+export async function clearAllMobileSqliteTables(): Promise<void> {
+  const { db } = await ensureDb();
+  await db.execAsync(`
+    DELETE FROM sync_queue;
+    DELETE FROM envs;
+    DELETE FROM folders;
+  `);
+}
+
+/**
  * Ensure persistent database is opened and ready before executing any operation
  */
 export async function ensureDb(): Promise<{
   db: SQLite.SQLiteDatabase;
-  drizzle: ExpoSQLiteDatabase<{ folders: typeof folders; envs: typeof envs }>;
+  drizzle: ExpoSQLiteDatabase<{
+    folders: typeof folders;
+    envs: typeof envs;
+    syncQueue: typeof syncQueue;
+  }>;
 }> {
   if (!expoDbInstance || !drizzleDb) {
     await initMobileSqlite();
@@ -249,6 +343,128 @@ export async function ensureDb(): Promise<{
     throw new Error('Persistent SQLite database could not be initialized');
   }
   return { db: expoDbInstance, drizzle: drizzleDb };
+}
+
+/**
+ * Enqueue a sync mutation in the persistent SQLite sync_queue table
+ */
+export async function enqueueSyncItem(params: {
+  entityType: 'folder' | 'env';
+  entityId: string;
+  action: 'create' | 'update' | 'delete' | 'bulk_import';
+  payload: any;
+}): Promise<string> {
+  const { drizzle } = await ensureDb();
+  const id = generateUuid();
+  const now = new Date().toISOString();
+
+  await drizzle.insert(syncQueue).values({
+    id,
+    entityType: params.entityType,
+    entityId: params.entityId,
+    action: params.action,
+    payload: JSON.stringify(params.payload),
+    status: 'pending',
+    retryCount: 0,
+    lastError: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  return id;
+}
+
+/**
+ * Fetch all pending or failed sync mutations from SQLite sync_queue table
+ */
+export async function getPendingSyncQueue(limit?: number): Promise<SyncQueueItem[]> {
+  const { drizzle } = await ensureDb();
+  let query = drizzle
+    .select()
+    .from(syncQueue)
+    .where(or(eq(syncQueue.status, 'pending'), eq(syncQueue.status, 'failed')))
+    .orderBy(asc(syncQueue.createdAt));
+
+  if (limit) {
+    query = query.limit(limit) as any;
+  }
+
+  const rows = await query;
+  return rows as SyncQueueItem[];
+}
+
+/**
+ * Update the status of a sync queue item
+ */
+export async function updateSyncItemStatus(
+  id: string,
+  status: 'pending' | 'syncing' | 'failed',
+  lastError?: string
+): Promise<void> {
+  const { drizzle } = await ensureDb();
+  const now = new Date().toISOString();
+
+  if (status === 'failed') {
+    await drizzle
+      .update(syncQueue)
+      .set({
+        status,
+        lastError: lastError || 'Unknown sync error',
+        retryCount: sql`retry_count + 1`,
+        updatedAt: now,
+      })
+      .where(eq(syncQueue.id, id));
+  } else {
+    await drizzle
+      .update(syncQueue)
+      .set({
+        status,
+        updatedAt: now,
+      })
+      .where(eq(syncQueue.id, id));
+  }
+}
+
+/**
+ * Remove a completed item from the sync_queue
+ */
+export async function removeSyncItem(id: string): Promise<void> {
+  const { drizzle } = await ensureDb();
+  await drizzle.delete(syncQueue).where(eq(syncQueue.id, id));
+}
+
+/**
+ * Mark a local entity as fully synced in SQLite
+ */
+export async function markEntitySynced(
+  entityType: 'folder' | 'env',
+  entityId: string
+): Promise<void> {
+  const { drizzle } = await ensureDb();
+  if (entityType === 'folder') {
+    await drizzle
+      .update(folders)
+      .set({ syncStatus: 'synced' })
+      .where(eq(folders.id, entityId));
+  } else {
+    await drizzle
+      .update(envs)
+      .set({ syncStatus: 'synced' })
+      .where(eq(envs.id, entityId));
+  }
+}
+
+/**
+ * Get count of pending sync mutations
+ */
+export async function getPendingSyncCount(): Promise<number> {
+  const { drizzle } = await ensureDb();
+  const res = await drizzle
+    .select({ count: sql<number>`count(*)` })
+    .from(syncQueue)
+    .where(or(eq(syncQueue.status, 'pending'), eq(syncQueue.status, 'failed')));
+
+  return Number(res[0]?.count || 0);
 }
 
 /**
@@ -393,6 +609,7 @@ export async function createMobileFolder(data: {
       createdById: data.createdById || null,
       createdAt: now,
       updatedAt: now,
+      syncStatus: 'pending_create',
     })
     .onConflictDoUpdate({
       target: folders.id,
@@ -400,6 +617,7 @@ export async function createMobileFolder(data: {
         name: trimmedName,
         description: data.description?.trim() || null,
         updatedAt: now,
+        syncStatus: 'pending_update',
       },
     });
 
@@ -415,6 +633,7 @@ export async function createMobileFolder(data: {
     createdAt: now,
     updatedAt: now,
     envCount: 0,
+    syncStatus: 'pending_create',
   };
 }
 
@@ -436,6 +655,7 @@ export async function updateMobileFolder(
       name: trimmedName,
       description: description?.trim() || null,
       updatedAt: now,
+      syncStatus: 'pending_update',
     })
     .where(eq(folders.id, folderId));
 }
@@ -580,6 +800,8 @@ export async function upsertMobileEnv(data: {
 
   targetId = targetId || generateUuid();
 
+  const syncStatus = data.id ? 'pending_update' : 'pending_create';
+
   // Upsert using Drizzle ORM onConflictDoUpdate
   await drizzle
     .insert(envs)
@@ -597,6 +819,7 @@ export async function upsertMobileEnv(data: {
       createdById: data.createdById || null,
       createdAt: now,
       updatedAt: now,
+      syncStatus,
     })
     .onConflictDoUpdate({
       target: envs.id,
@@ -610,6 +833,7 @@ export async function upsertMobileEnv(data: {
         isSecret: isSecret,
         comment: data.comment || null,
         updatedAt: now,
+        syncStatus: 'pending_update',
       },
     });
 
@@ -627,6 +851,7 @@ export async function upsertMobileEnv(data: {
     createdById: data.createdById,
     createdAt: now,
     updatedAt: now,
+    syncStatus,
   };
 }
 
@@ -1071,7 +1296,7 @@ export async function syncFoldersFromRemote(
 ): Promise<void> {
   const { drizzle } = await ensureDb();
 
-  // 1. Reconcile deletions: remove local folders in this scope absent from remote
+  // 1. Reconcile deletions: remove local folders in this scope absent from remote (ONLY if already synced)
   const remoteFolderIds = remoteFolders.map((rf) => rf.id).filter(Boolean);
   if (remoteFolderIds.length > 0) {
     await drizzle
@@ -1081,6 +1306,7 @@ export async function syncFoldersFromRemote(
           eq(folders.workspaceId, workspaceId),
           eq(folders.teamId, teamId),
           eq(folders.environment, environment),
+          eq(folders.syncStatus, 'synced'),
           notInArray(folders.id, remoteFolderIds)
         )
       );
@@ -1091,13 +1317,29 @@ export async function syncFoldersFromRemote(
         and(
           eq(folders.workspaceId, workspaceId),
           eq(folders.teamId, teamId),
-          eq(folders.environment, environment)
+          eq(folders.environment, environment),
+          eq(folders.syncStatus, 'synced')
         )
       );
   }
 
-  // 2. Upsert returned folders
+  // 2. Fetch any items pending deletion in local queue to avoid ghost revive
+  const pendingDeletes = await drizzle
+    .select({ entityId: syncQueue.entityId })
+    .from(syncQueue)
+    .where(
+      and(
+        eq(syncQueue.entityType, 'folder'),
+        eq(syncQueue.action, 'delete'),
+        inArray(syncQueue.status, ['pending', 'syncing'])
+      )
+    );
+  const pendingDeleteIds = new Set(pendingDeletes.map((p) => p.entityId));
+
+  // 3. Upsert returned folders (marking them as synced)
   for (const rf of remoteFolders) {
+    if (pendingDeleteIds.has(rf.id)) continue;
+
     const createdAtStr = rf.createdAt
       ? typeof rf.createdAt === 'string'
         ? rf.createdAt
@@ -1122,6 +1364,7 @@ export async function syncFoldersFromRemote(
         createdById: rf.createdById || null,
         createdAt: createdAtStr,
         updatedAt: updatedAtStr,
+        syncStatus: 'synced',
       })
       .onConflictDoUpdate({
         target: folders.id,
@@ -1131,6 +1374,7 @@ export async function syncFoldersFromRemote(
           createdBy: rf.createdBy || 'Unknown',
           createdById: rf.createdById || null,
           updatedAt: updatedAtStr,
+          syncStatus: 'synced',
         },
       });
   }
@@ -1148,12 +1392,13 @@ export async function syncEnvsFromRemote(
 ): Promise<void> {
   const { drizzle } = await ensureDb();
 
-  // 1. Reconcile deletions: remove local envs in this scope absent from remote
+  // 1. Reconcile deletions: remove local envs in this scope absent from remote (ONLY if already synced)
   const remoteEnvIds = remoteEnvs.map((re) => re.id).filter(Boolean);
   const scopeConditions = [
     eq(envs.workspaceId, workspaceId),
     eq(envs.teamId, teamId),
     eq(envs.environment, environment),
+    eq(envs.syncStatus, 'synced'),
   ];
 
   if (folderScope !== undefined) {
@@ -1174,8 +1419,23 @@ export async function syncEnvsFromRemote(
       .where(and(...scopeConditions));
   }
 
-  // 2. Upsert returned envs
+  // 2. Fetch any envs pending deletion in local queue to avoid ghost revive
+  const pendingDeletes = await drizzle
+    .select({ entityId: syncQueue.entityId })
+    .from(syncQueue)
+    .where(
+      and(
+        eq(syncQueue.entityType, 'env'),
+        eq(syncQueue.action, 'delete'),
+        inArray(syncQueue.status, ['pending', 'syncing'])
+      )
+    );
+  const pendingDeleteIds = new Set(pendingDeletes.map((p) => p.entityId));
+
+  // 3. Upsert returned envs (marking them as synced)
   for (const re of remoteEnvs) {
+    if (pendingDeleteIds.has(re.id)) continue;
+
     const createdAtStr = re.createdAt
       ? typeof re.createdAt === 'string'
         ? re.createdAt
@@ -1206,6 +1466,7 @@ export async function syncEnvsFromRemote(
         createdById: re.createdById || null,
         createdAt: createdAtStr,
         updatedAt: updatedAtStr,
+        syncStatus: 'synced',
       })
       .onConflictDoUpdate({
         target: envs.id,
@@ -1218,6 +1479,7 @@ export async function syncEnvsFromRemote(
           createdBy: re.createdBy || 'Unknown',
           createdById: re.createdById || null,
           updatedAt: updatedAtStr,
+          syncStatus: 'synced',
         },
       });
   }
