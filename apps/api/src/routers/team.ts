@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc.js';
 import { dataStore } from '../storage/store.js';
 import { TRPCError } from '@trpc/server';
-import { sendTeamInvitationEmail } from '../services/emailService.js';
+import { sendTeamInvitationEmail, getPublicBaseUrl } from '../services/emailService.js';
 
 export const teamRouter = router({
   list: protectedProcedure
@@ -90,15 +90,7 @@ export const teamRouter = router({
         invitedBy: ctx.user.id,
       });
 
-      let apiHost = process.env.API_PUBLIC_URL || process.env.APP_PUBLIC_URL;
-      if (!apiHost) {
-        const rawHost = ctx.req.get('host') || 'localhost:4000';
-        const allowedHosts = ['localhost:4000', '127.0.0.1:4000', '10.0.2.2:4000'];
-        const host = allowedHosts.includes(rawHost) ? rawHost : 'localhost:4000';
-        const protocol = ctx.req.protocol === 'https' ? 'https' : 'http';
-        apiHost = `${protocol}://${host}`;
-      }
-      apiHost = apiHost.replace(/\/+$/, '');
+      const apiHost = getPublicBaseUrl(ctx.req);
       const inviteUrl = `${apiHost}/auth/accept-invite?token=${invite.inviteCode}`;
 
       await sendTeamInvitationEmail(
