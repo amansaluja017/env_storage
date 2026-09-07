@@ -10,6 +10,7 @@ import { tokenStore } from '../storage/tokenStore.js';
 import {
   sendEmailVerificationEmail,
   sendPasswordResetEmail,
+  getPublicBaseUrl,
 } from '../services/emailService.js';
 
 // Token Expirations
@@ -272,7 +273,7 @@ export const authRouter = router({
         email: z.string().email('Valid email address required'),
       })
     )
-    .mutation(async ({ input }) => {
+    .mutation(async ({ ctx, input }) => {
       const email = input.email.toLowerCase().trim();
       const ACK_MESSAGE =
         'If an account exists with this email address, password reset instructions have been generated.';
@@ -302,9 +303,7 @@ export const authRouter = router({
         metadata: { email: foundUser.email },
       });
 
-      const publicBaseUrl = (
-        process.env.APP_PUBLIC_URL || `http://localhost:${process.env.PORT || 4000}`
-      ).replace(/\/+$/, '');
+      const publicBaseUrl = getPublicBaseUrl(ctx.req);
       const resetUrl = `${publicBaseUrl}/auth/reset-password?token=${resetToken}`;
       const mailResult = await sendPasswordResetEmail(foundUser.email, resetUrl);
 
@@ -501,11 +500,17 @@ export const authRouter = router({
         metadata: JSON.stringify({ newEmail, userId: currentUser.id }),
       });
 
-      const publicBaseUrl = (
-        process.env.APP_PUBLIC_URL || `http://localhost:${process.env.PORT || 4000}`
-      ).replace(/\/+$/, '');
+      const publicBaseUrl = getPublicBaseUrl(ctx.req);
       const verifyUrl = `${publicBaseUrl}/auth/verify-email?token=${verifyToken}`;
       const mailResult = await sendEmailVerificationEmail(newEmail, verifyUrl);
+
+      if (!mailResult.success && process.env.NODE_ENV === 'production') {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message:
+            'Failed to deliver email verification. Please check server email service configuration (e.g. RESEND_API_KEY).',
+        });
+      }
 
       return {
         success: true,

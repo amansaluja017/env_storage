@@ -1,10 +1,50 @@
+import 'dotenv/config';
 import nodemailer, { type Transporter } from 'nodemailer';
 import { escapeHtml } from '../views/webAuthPages.js';
 
-const GMAIL_USER = process.env.GMAIL_USER || '';
-const GMAIL_PASS = process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASS || '';
+// Configuration helpers
+function getEmailConfig() {
+  return {
+    resendApiKey: process.env.RESEND_API_KEY || '',
+    brevoApiKey: process.env.BREVO_API_KEY || '',
+    emailFrom: process.env.EMAIL_FROM || '',
+    gmailUser: process.env.GMAIL_USER || '',
+    gmailPass: process.env.GMAIL_APP_PASSWORD || process.env.GMAIL_PASS || '',
+    smtpHost: process.env.SMTP_HOST || '',
+    smtpPort: process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 587,
+    smtpUser: process.env.SMTP_USER || '',
+    smtpPass: process.env.SMTP_PASS || '',
+    smtpSecure: process.env.SMTP_SECURE === 'true',
+    allowRawPreviews: process.env.ALLOW_INSECURE_PREVIEWS === 'true',
+    isProduction: process.env.NODE_ENV === 'production',
+    isRender: process.env.RENDER === 'true',
+  };
+}
 
-const allowRawPreviews = process.env.ALLOW_INSECURE_PREVIEWS === 'true';
+/**
+ * Resolves the public base URL of the API server for verification and reset links.
+ * Checks APP_PUBLIC_URL, API_PUBLIC_URL, RENDER_EXTERNAL_URL, and incoming request headers.
+ */
+export function getPublicBaseUrl(req?: any): string {
+  if (process.env.APP_PUBLIC_URL) {
+    return process.env.APP_PUBLIC_URL.replace(/\/+$/, '');
+  }
+  if (process.env.API_PUBLIC_URL) {
+    return process.env.API_PUBLIC_URL.replace(/\/+$/, '');
+  }
+  if (process.env.RENDER_EXTERNAL_URL) {
+    return process.env.RENDER_EXTERNAL_URL.replace(/\/+$/, '');
+  }
+  if (req && typeof req.get === 'function') {
+    const rawHost = req.get('host');
+    if (rawHost) {
+      const proto =
+        req.get('x-forwarded-proto') || (req.protocol === 'https' ? 'https' : 'http');
+      return `${proto}://${rawHost}`.replace(/\/+$/, '');
+    }
+  }
+  return `http://localhost:${process.env.PORT || 4000}`;
+}
 
 function redactEmail(email: string): string {
   const [user, domain] = email.split('@');
@@ -28,21 +68,221 @@ function redactUrlToken(urlStr: string): string {
   return urlStr.replace(/(token=)([^&]+)/, '$1[REDACTED]');
 }
 
-let transporter: Transporter | null = null;
+// Cached SMTP transporter
+let cachedTransporter: Transporter | null = null;
+let cachedTransporterKey = '';
 
-if (GMAIL_USER && GMAIL_PASS) {
-  transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: GMAIL_USER,
-      pass: GMAIL_PASS,
-    },
-  });
-  console.log(`📧 Gmail Nodemailer initialized for: ${GMAIL_USER}`);
+function getSmtpTransporter(): Transporter | null {
+  const config = getEmailConfig();
+  const currentKey = `${config.smtpHost}:${config.smtpPort}:${config.smtpUser}:${config.gmailUser}:${config.gmailPass}`;
+
+  if (cachedTransporter && cachedTransporterKey === currentKey) {
+    return cachedTransporter;
+  }
+
+  if (config.smtpHost && config.smtpUser && config.smtpPass) {
+    cachedTransporter = nodemailer.createTransport({
+      host: config.smtpHost,
+      port: config.smtpPort,
+      secure: config.smtpSecure || config.smtpPort === 465,
+      auth: {
+        user: config.smtpUser,
+        pass: config.smtpPass,
+      },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
+    });
+    cachedTransporterKey = currentKey;
+    console.log(`📧 Custom SMTP Nodemailer initialized for: ${config.smtpHost}:${config.smtpPort}`);
+    return cachedTransporter;
+  }
+
+  if (config.gmailUser && config.gmailPass) {
+    cachedTransporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: config.gmailUser,
+        pass: config.gmailPass,
+      },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
+    });
+    cachedTransporterKey = currentKey;
+    console.log(`📧 Gmail Nodemailer initialized for: ${config.gmailUser}`);
+    return cachedTransporter;
+  }
+
+  return null;
+}
+
+// Log startup diagnostics
+const initialConfig = getEmailConfig();
+if (initialConfig.resendApiKey) {
+  console.log('📧 Email provider configured: Resend HTTP API (HTTPS port 443)');
+} else if (initialConfig.brevoApiKey) {
+  console.log('📧 Email provider configured: Brevo HTTP API (HTTPS port 443)');
+} else if (initialConfig.gmailUser && initialConfig.gmailPass) {
+  if (initialConfig.isRender) {
+    console.warn(`
+⚠️ [EMAIL SERVICE WARNING - RENDER DETECTED]
+You have configured Gmail SMTP on Render. Render free-tier blocks outbound traffic on SMTP ports (25, 465, 587).
+If emails fail with a connection timeout (ETIMEDOUT):
+  1. Add RESEND_API_KEY to your Render Environment Variables (recommended, works over HTTPS).
+  2. Or upgrade Render to a paid instance to unblock SMTP ports.
+`);
+  } else {
+    console.log(`📧 Email provider configured: Gmail Nodemailer (${initialConfig.gmailUser})`);
+  }
 } else {
   console.warn(
-    '⚠️ GMAIL_USER and GMAIL_APP_PASSWORD not detected in environment. Emails will be logged to the console.'
+    '⚠️ No email provider configured (RESEND_API_KEY, BREVO_API_KEY, or GMAIL_USER & GMAIL_APP_PASSWORD). Emails will be logged to console.'
   );
+}
+
+interface SendEmailParams {
+  toEmail: string;
+  subject: string;
+  htmlContent: string;
+  fromName: string;
+  previewUrl?: string;
+}
+
+/**
+ * Universal email dispatcher:
+ * 1. Resend HTTP REST API (Recommended for cloud/Render free-tier, bypasses SMTP port blocking)
+ * 2. Brevo HTTP REST API (Alternative HTTP provider)
+ * 3. Nodemailer (Custom SMTP or Gmail SMTP)
+ * 4. Development Console Fallback
+ */
+async function sendEmail(params: SendEmailParams): Promise<{ success: boolean; previewUrl?: string; error?: string }> {
+  const config = getEmailConfig();
+  const { toEmail, subject, htmlContent, fromName, previewUrl } = params;
+
+  // 1. Try Resend HTTP API (Outbound HTTPS port 443, immune to SMTP blocking)
+  if (config.resendApiKey) {
+    try {
+      const defaultFrom = config.emailFrom || `${fromName} <onboarding@resend.dev>`;
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.resendApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: defaultFrom,
+          to: [toEmail],
+          subject,
+          html: htmlContent,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        console.error(`❌ Failed to send email via Resend (${response.status}):`, errorBody);
+        return { success: false, error: `Resend error: ${response.status} ${errorBody}` };
+      }
+
+      console.log(`✉️ Email successfully sent via Resend to ${toEmail}`);
+      return { success: true };
+    } catch (err: any) {
+      console.error('❌ Resend HTTP request exception:', err?.message || err);
+      return { success: false, error: err?.message || 'Resend network error' };
+    }
+  }
+
+  // 2. Try Brevo HTTP API (Outbound HTTPS port 443)
+  if (config.brevoApiKey) {
+    try {
+      const senderEmail = config.emailFrom || config.gmailUser || 'no-reply@tubovault.com';
+      const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'api-key': config.brevoApiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          sender: { name: fromName, email: senderEmail },
+          to: [{ email: toEmail }],
+          subject,
+          htmlContent,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        console.error(`❌ Failed to send email via Brevo (${response.status}):`, errorBody);
+        return { success: false, error: `Brevo error: ${response.status} ${errorBody}` };
+      }
+
+      console.log(`✉️ Email successfully sent via Brevo to ${toEmail}`);
+      return { success: true };
+    } catch (err: any) {
+      console.error('❌ Brevo HTTP request exception:', err?.message || err);
+      return { success: false, error: err?.message || 'Brevo network error' };
+    }
+  }
+
+  // 3. Try Nodemailer (SMTP / Gmail)
+  const transporter = getSmtpTransporter();
+  if (transporter) {
+    try {
+      const fromAddress = config.emailFrom || `"${fromName}" <${config.smtpUser || config.gmailUser}>`;
+      await transporter.sendMail({
+        from: fromAddress,
+        to: toEmail,
+        subject,
+        html: htmlContent,
+      });
+      console.log(`✉️ Email sent via SMTP to ${toEmail}`);
+      return { success: true };
+    } catch (err: any) {
+      const isTimeout =
+        err?.code === 'ETIMEDOUT' ||
+        err?.code === 'ECONNREFUSED' ||
+        err?.message?.includes('timeout') ||
+        err?.command === 'CONN';
+
+      if (isTimeout && config.isRender) {
+        console.error(`
+❌ [SMTP CONNECTION TIMEOUT ON RENDER]
+Render free-tier blocks outbound traffic to SMTP ports (25, 465, 587).
+The connection to the mail server timed out.
+To resolve this:
+  1. Create a free account on https://resend.com
+  2. Add RESEND_API_KEY=re_... in your Render Dashboard -> Environment Variables
+  3. Redeploy. Emails will be delivered instantly over HTTPS (port 443).
+`);
+      } else {
+        console.error('❌ Failed to send email via SMTP:', err?.message || err);
+      }
+      return { success: false, error: err?.message || 'SMTP error' };
+    }
+  }
+
+  // 4. Console Fallback (When no transport or API key is configured)
+  const displayEmail = config.allowRawPreviews ? toEmail : redactEmail(toEmail);
+  const displayUrl = previewUrl ? (config.allowRawPreviews ? previewUrl : redactUrlToken(previewUrl)) : '';
+
+  if (config.isProduction) {
+    console.warn(`
+⚠️ [EMAIL NOT DELIVERED - NO EMAIL SERVICE CONFIGURED IN PRODUCTION]
+Attempted to send to: ${displayEmail}
+Subject: ${subject}
+Please configure RESEND_API_KEY or GMAIL_USER & GMAIL_APP_PASSWORD in your production environment variables.
+`);
+  }
+
+  console.log('\n====================== [EMAIL PREVIEW] ======================');
+  console.log(`To: ${displayEmail}`);
+  console.log(`Subject: ${subject}`);
+  if (displayUrl) {
+    console.log(`Action URL: ${displayUrl}`);
+  }
+  console.log('=============================================================\n');
+
+  return { success: true, previewUrl };
 }
 
 /**
@@ -51,7 +291,7 @@ if (GMAIL_USER && GMAIL_PASS) {
 export async function sendEmailVerificationEmail(
   toEmail: string,
   verifyUrl: string
-): Promise<{ success: boolean; previewUrl?: string }> {
+): Promise<{ success: boolean; previewUrl?: string; error?: string }> {
   const subject = 'Verify your new Tubo account email';
   const htmlContent = `
     <!DOCTYPE html>
@@ -93,33 +333,13 @@ export async function sendEmailVerificationEmail(
     </html>
   `;
 
-  if (transporter && GMAIL_USER) {
-    try {
-      await transporter.sendMail({
-        from: `"Tubo Vault Security" <${GMAIL_USER}>`,
-        to: toEmail,
-        subject,
-        html: htmlContent,
-      });
-      console.log(`✉️ Email verification sent via Gmail to ${toEmail}`);
-      return { success: true };
-    } catch (err: any) {
-      console.error('❌ Failed to send email verification via Gmail:', err?.message || err);
-      return { success: false };
-    }
-  }
-
-  // Console fallback for testing & local development (when no transport is configured)
-  const displayEmail = allowRawPreviews ? toEmail : redactEmail(toEmail);
-  const displayUrl = allowRawPreviews ? verifyUrl : redactUrlToken(verifyUrl);
-
-  console.log('\n================== [EMAIL VERIFICATION PREVIEW] ==================');
-  console.log(`To: ${displayEmail}`);
-  console.log(`Subject: ${subject}`);
-  console.log(`Verification URL: ${displayUrl}`);
-  console.log('===================================================================\n');
-
-  return { success: true, previewUrl: verifyUrl };
+  return sendEmail({
+    toEmail,
+    subject,
+    htmlContent,
+    fromName: 'Tubo Vault Security',
+    previewUrl: verifyUrl,
+  });
 }
 
 /**
@@ -128,7 +348,7 @@ export async function sendEmailVerificationEmail(
 export async function sendPasswordResetEmail(
   toEmail: string,
   resetUrl: string
-): Promise<{ success: boolean; previewUrl?: string }> {
+): Promise<{ success: boolean; previewUrl?: string; error?: string }> {
   const subject = 'Reset your Tubo account password';
   const htmlContent = `
     <!DOCTYPE html>
@@ -170,33 +390,13 @@ export async function sendPasswordResetEmail(
     </html>
   `;
 
-  if (transporter && GMAIL_USER) {
-    try {
-      await transporter.sendMail({
-        from: `"Tubo Vault Security" <${GMAIL_USER}>`,
-        to: toEmail,
-        subject,
-        html: htmlContent,
-      });
-      console.log(`✉️ Password reset email sent via Gmail to ${toEmail}`);
-      return { success: true };
-    } catch (err: any) {
-      console.error('❌ Failed to send password reset via Gmail:', err?.message || err);
-      return { success: false };
-    }
-  }
-
-  // Console fallback for testing & local development (when no transport is configured)
-  const displayEmail = allowRawPreviews ? toEmail : redactEmail(toEmail);
-  const displayUrl = allowRawPreviews ? resetUrl : redactUrlToken(resetUrl);
-
-  console.log('\n=================== [PASSWORD RESET PREVIEW] ===================');
-  console.log(`To: ${displayEmail}`);
-  console.log(`Subject: ${subject}`);
-  console.log(`Reset Portal URL: ${displayUrl}`);
-  console.log('=================================================================\n');
-
-  return { success: true, previewUrl: resetUrl };
+  return sendEmail({
+    toEmail,
+    subject,
+    htmlContent,
+    fromName: 'Tubo Vault Security',
+    previewUrl: resetUrl,
+  });
 }
 
 /**
@@ -208,7 +408,7 @@ export async function sendTeamInvitationEmail(
   teamName: string,
   workspaceName: string,
   inviterName?: string
-): Promise<{ success: boolean; previewUrl?: string }> {
+): Promise<{ success: boolean; previewUrl?: string; error?: string }> {
   const safeTeamName = escapeHtml(teamName);
   const safeWorkspaceName = escapeHtml(workspaceName);
   const safeInviterName = inviterName ? escapeHtml(inviterName) : undefined;
@@ -262,32 +462,36 @@ export async function sendTeamInvitationEmail(
     </html>
   `;
 
-  if (transporter && GMAIL_USER) {
-    try {
-      await transporter.sendMail({
-        from: `"Tubo Vault" <${GMAIL_USER}>`,
-        to: toEmail,
-        subject,
-        html: htmlContent,
-      });
-      console.log(`✉️ Team invitation sent via Gmail to ${toEmail}`);
-      return { success: true };
-    } catch (err: any) {
-      console.error('❌ Failed to send team invitation via Gmail:', err?.message || err);
-      return { success: false };
-    }
-  }
+  return sendEmail({
+    toEmail,
+    subject,
+    htmlContent,
+    fromName: 'Tubo Vault',
+    previewUrl: inviteUrl,
+  });
+}
 
-  // Console fallback for local development (when no transport is configured)
-  const displayEmail = allowRawPreviews ? toEmail : redactEmail(toEmail);
-  const displayUrl = allowRawPreviews ? inviteUrl : redactUrlToken(inviteUrl);
+/**
+ * Diagnostic helper to test email delivery
+ */
+export async function testEmailDelivery(testToEmail: string): Promise<{ success: boolean; provider: string; error?: string }> {
+  const config = getEmailConfig();
+  let provider = 'Console Preview';
+  if (config.resendApiKey) provider = 'Resend (HTTP/443)';
+  else if (config.brevoApiKey) provider = 'Brevo (HTTP/443)';
+  else if (config.smtpHost) provider = `Custom SMTP (${config.smtpHost}:${config.smtpPort})`;
+  else if (config.gmailUser) provider = `Gmail SMTP (${config.gmailUser})`;
 
-  console.log('\n=================== [TEAM INVITATION PREVIEW] ===================');
-  console.log(`To: ${displayEmail}`);
-  console.log(`Subject: ${subject}`);
-  console.log(`Team: ${safeTeamName} | Workspace: ${safeWorkspaceName}`);
-  console.log(`Invite URL: ${displayUrl}`);
-  console.log('=================================================================\n');
+  const result = await sendEmail({
+    toEmail: testToEmail,
+    subject: 'Tubo Vault Email Delivery Test',
+    htmlContent: '<p>This is a test email from Tubo Vault to confirm production email delivery.</p>',
+    fromName: 'Tubo Vault System',
+  });
 
-  return { success: true, previewUrl: inviteUrl };
+  return {
+    success: result.success,
+    provider,
+    error: result.error,
+  };
 }
