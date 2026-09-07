@@ -508,7 +508,7 @@ export const authRouter = router({
         throw new TRPCError({
           code: 'INTERNAL_SERVER_ERROR',
           message:
-            'Failed to deliver email verification. Please check server email service configuration (e.g. RESEND_API_KEY).',
+            'Failed to deliver email verification. Please check server email service configuration (e.g. BREVO_API_KEY).',
         });
       }
 

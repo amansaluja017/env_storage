@@ -119,25 +119,26 @@ function getSmtpTransporter(): Transporter | null {
 
 // Log startup diagnostics
 const initialConfig = getEmailConfig();
-if (initialConfig.resendApiKey) {
-  console.log('📧 Email provider configured: Resend HTTP API (HTTPS port 443)');
-} else if (initialConfig.brevoApiKey) {
+if (initialConfig.brevoApiKey) {
   console.log('📧 Email provider configured: Brevo HTTP API (HTTPS port 443)');
+} else if (initialConfig.resendApiKey) {
+  console.log('📧 Email provider configured: Resend HTTP API (HTTPS port 443)');
 } else if (initialConfig.gmailUser && initialConfig.gmailPass) {
   if (initialConfig.isRender) {
     console.warn(`
 ⚠️ [EMAIL SERVICE WARNING - RENDER DETECTED]
 You have configured Gmail SMTP on Render. Render free-tier blocks outbound traffic on SMTP ports (25, 465, 587).
 If emails fail with a connection timeout (ETIMEDOUT):
-  1. Add RESEND_API_KEY to your Render Environment Variables (recommended, works over HTTPS).
-  2. Or upgrade Render to a paid instance to unblock SMTP ports.
+  1. Add BREVO_API_KEY to your Render Environment Variables (works over HTTPS port 443 to any email).
+  2. Or add RESEND_API_KEY (requires verified custom domain to send to any email).
+  3. Or upgrade Render to a paid instance to unblock SMTP ports.
 `);
   } else {
     console.log(`📧 Email provider configured: Gmail Nodemailer (${initialConfig.gmailUser})`);
   }
 } else {
   console.warn(
-    '⚠️ No email provider configured (RESEND_API_KEY, BREVO_API_KEY, or GMAIL_USER & GMAIL_APP_PASSWORD). Emails will be logged to console.'
+    '⚠️ No email provider configured (BREVO_API_KEY, RESEND_API_KEY, or GMAIL_USER & GMAIL_APP_PASSWORD). Emails will be logged to console.'
   );
 }
 
@@ -151,8 +152,8 @@ interface SendEmailParams {
 
 /**
  * Universal email dispatcher:
- * 1. Resend HTTP REST API (Recommended for cloud/Render free-tier, bypasses SMTP port blocking)
- * 2. Brevo HTTP REST API (Alternative HTTP provider)
+ * 1. Brevo HTTP REST API (Recommended: HTTPS port 443, sends to any recipient without domain lock)
+ * 2. Resend HTTP REST API (HTTPS port 443, requires custom domain for non-admin recipients)
  * 3. Nodemailer (Custom SMTP or Gmail SMTP)
  * 4. Development Console Fallback
  */
@@ -160,42 +161,21 @@ async function sendEmail(params: SendEmailParams): Promise<{ success: boolean; p
   const config = getEmailConfig();
   const { toEmail, subject, htmlContent, fromName, previewUrl } = params;
 
-  // 1. Try Resend HTTP API (Outbound HTTPS port 443, immune to SMTP blocking)
-  if (config.resendApiKey) {
-    try {
-      const defaultFrom = config.emailFrom || `${fromName} <onboarding@resend.dev>`;
-      const response = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${config.resendApiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: defaultFrom,
-          to: [toEmail],
-          subject,
-          html: htmlContent,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        console.error(`❌ Failed to send email via Resend (${response.status}):`, errorBody);
-        return { success: false, error: `Resend error: ${response.status} ${errorBody}` };
-      }
-
-      console.log(`✉️ Email successfully sent via Resend to ${toEmail}`);
-      return { success: true };
-    } catch (err: any) {
-      console.error('❌ Resend HTTP request exception:', err?.message || err);
-      return { success: false, error: err?.message || 'Resend network error' };
-    }
-  }
-
-  // 2. Try Brevo HTTP API (Outbound HTTPS port 443)
+  // 1. Try Brevo HTTP API (Outbound HTTPS port 443, immune to SMTP blocking)
   if (config.brevoApiKey) {
     try {
-      const senderEmail = config.emailFrom || config.gmailUser || 'no-reply@tubovault.com';
+      let senderEmail = config.emailFrom || config.gmailUser || 'amansaluja017@gmail.com';
+      let senderName = fromName;
+
+      // Extract email address and optional display name if formatted as "Name <email@domain.com>"
+      const emailMatch = senderEmail.match(/^(?:(.*?)<)?([^<>\s]+@[^<>\s]+)>?$/);
+      if (emailMatch) {
+        if (emailMatch[1]?.trim()) {
+          senderName = emailMatch[1].trim().replace(/^["']|["']$/g, '');
+        }
+        senderEmail = emailMatch[2].trim();
+      }
+
       const response = await fetch('https://api.brevo.com/v3/smtp/email', {
         method: 'POST',
         headers: {
@@ -203,7 +183,7 @@ async function sendEmail(params: SendEmailParams): Promise<{ success: boolean; p
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          sender: { name: fromName, email: senderEmail },
+          sender: { name: senderName, email: senderEmail },
           to: [{ email: toEmail }],
           subject,
           htmlContent,
@@ -221,6 +201,38 @@ async function sendEmail(params: SendEmailParams): Promise<{ success: boolean; p
     } catch (err: any) {
       console.error('❌ Brevo HTTP request exception:', err?.message || err);
       return { success: false, error: err?.message || 'Brevo network error' };
+    }
+  }
+
+  // 2. Try Resend HTTP API (Outbound HTTPS port 443, immune to SMTP blocking)
+  if (config.resendApiKey) {
+    try {
+      const defaultFrom = config.emailFrom || `${fromName} <onboarding@resend.dev>`;
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.resendApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: defaultFrom,
+          to: [toEmail],
+          subject,
+          htmlContent,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        console.error(`❌ Failed to send email via Resend (${response.status}):`, errorBody);
+        return { success: false, error: `Resend error: ${response.status} ${errorBody}` };
+      }
+
+      console.log(`✉️ Email successfully sent via Resend to ${toEmail}`);
+      return { success: true };
+    } catch (err: any) {
+      console.error('❌ Resend HTTP request exception:', err?.message || err);
+      return { success: false, error: err?.message || 'Resend network error' };
     }
   }
 
@@ -477,8 +489,8 @@ export async function sendTeamInvitationEmail(
 export async function testEmailDelivery(testToEmail: string): Promise<{ success: boolean; provider: string; error?: string }> {
   const config = getEmailConfig();
   let provider = 'Console Preview';
-  if (config.resendApiKey) provider = 'Resend (HTTP/443)';
-  else if (config.brevoApiKey) provider = 'Brevo (HTTP/443)';
+  if (config.brevoApiKey) provider = 'Brevo (HTTP/443)';
+  else if (config.resendApiKey) provider = 'Resend (HTTP/443)';
   else if (config.smtpHost) provider = `Custom SMTP (${config.smtpHost}:${config.smtpPort})`;
   else if (config.gmailUser) provider = `Gmail SMTP (${config.gmailUser})`;
 
