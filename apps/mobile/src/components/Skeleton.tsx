@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import {
   StyleSheet,
   View,
@@ -6,6 +6,7 @@ import {
   ViewStyle,
   DimensionValue,
 } from 'react-native';
+import { useGsapPulse } from '../utils/gsapAnimation';
 import { COLORS } from '../theme';
 
 interface SkeletonProps {
@@ -21,26 +22,8 @@ export function Skeleton({
   borderRadius = 6,
   style,
 }: SkeletonProps) {
-  const opacity = useRef(new Animated.Value(0.25)).current;
-
-  useEffect(() => {
-    const animation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(opacity, {
-          toValue: 0.7,
-          duration: 750,
-          useNativeDriver: true,
-        }),
-        Animated.timing(opacity, {
-          toValue: 0.25,
-          duration: 750,
-          useNativeDriver: true,
-        }),
-      ])
-    );
-    animation.start();
-    return () => animation.stop();
-  }, [opacity]);
+  // GSAP-powered silky-smooth sine pulse loading shimmer
+  const opacity = useGsapPulse(true, 0.22, 0.65, 0.75);
 
   return (
     <Animated.View

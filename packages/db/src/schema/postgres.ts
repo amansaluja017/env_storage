@@ -1,6 +1,5 @@
-import { pgTable, text, timestamp, varchar, uuid, index, boolean, pgEnum } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, varchar, uuid, index, boolean, pgEnum, unique } from 'drizzle-orm/pg-core';
 
-export const userRoleEnum = pgEnum('user_role', ['admin', 'member']);
 export const teamMemberRoleEnum = pgEnum('team_member_role', ['member', 'admin']);
 
 export const users = pgTable('users', {
@@ -113,4 +112,7 @@ export const envs = pgTable('envs', {
   index('envs_scope_idx').on(table.workspaceId, table.teamId, table.environment),
   index('envs_folder_idx').on(table.folderId),
   index('envs_key_idx').on(table.key),
+  unique('envs_scope_folder_key_unique')
+    .on(table.workspaceId, table.teamId, table.environment, table.folderId, table.key)
+    .nullsNotDistinct(),
 ]);

@@ -141,7 +141,7 @@ export const envRouter = router({
         teamId: z.string(),
         environment: z.enum(['development', 'staging', 'production']),
         folderId: z.string().nullable().optional(),
-        rawDotEnv: z.string().min(1, 'Raw .env content cannot be empty'),
+        rawDotEnv: z.string().min(1, 'Raw .env content cannot be empty').max(65536, 'Raw .env content exceeds maximum limit of 64KB'),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -159,7 +159,45 @@ export const envRouter = router({
         input.environment,
         input.folderId,
         input.rawDotEnv,
-        ctx.user.name || 'Team Member'
+        ctx.user.name || 'Team Member',
+        ctx.user.id,
+        ctx.user.role
       );
+    }),
+
+  /**
+   * Export environment variables as a compressed ZIP archive
+   */
+  exportZip: protectedProcedure
+    .input(
+      z.object({
+        workspaceId: z.string(),
+        teamId: z.string(),
+        environment: z.enum(['development', 'staging', 'production']),
+        folderIds: z.array(z.string()).optional(),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const isMember = await dataStore.isUserInTeam(input.teamId, ctx.user.id);
+      if (!isMember) {
+        throw new TRPCError({
+          code: 'FORBIDDEN',
+          message: 'Access Denied: You cannot export variables from a team you do not belong to.',
+        });
+      }
+
+      const result = await dataStore.exportEnvsAsZip({
+        workspaceId: input.workspaceId,
+        teamId: input.teamId,
+        environment: input.environment,
+        folderIds: input.folderIds,
+      });
+
+      return {
+        fileName: result.fileName,
+        base64: result.base64,
+        folderCount: result.folderCount,
+        envCount: result.envCount,
+      };
     }),
 });

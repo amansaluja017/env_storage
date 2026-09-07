@@ -1,7 +1,19 @@
 import * as SQLite from 'expo-sqlite';
 import { drizzle, ExpoSQLiteDatabase } from 'drizzle-orm/expo-sqlite';
 import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
-import { eq, and, or, like, desc, asc, sql, isNull } from 'drizzle-orm';
+import { eq, and, or, like, desc, asc, sql, isNull, notInArray } from 'drizzle-orm';
+import JSZip from 'jszip';
+import { Platform } from 'react-native';
+import * as FileSystemLegacy from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
+import { apiClient } from '../utils/apiClient';
+import {
+  encryptEnvValue,
+  decryptEnvValue,
+  isEncryptedEnvValue,
+} from '../utils/vaultCrypto';
+
+export { encryptEnvValue, decryptEnvValue, isEncryptedEnvValue };
 
 export const folders = sqliteTable('folders', {
   id: text('id').primaryKey(),
@@ -188,7 +200,26 @@ export async function initMobileSqlite(): Promise<void> {
       // 4. Initialize Drizzle ORM on top of the persistent SQLite database
       drizzleDb = drizzle(db, { schema: { folders, envs } });
 
-      // 5. Clean any leftover mock data
+      // 5. Ensure any sensitive environment variables in SQLite are encrypted (never stored dry)
+      try {
+        const sensitiveRows = await drizzleDb
+          .select({ id: envs.id, value: envs.value })
+          .from(envs)
+          .where(and(eq(envs.isSecret, true), sql`value NOT LIKE 'enc:v1:%'`));
+
+        for (const row of sensitiveRows) {
+          if (row.value && !isEncryptedEnvValue(row.value)) {
+            await drizzleDb
+              .update(envs)
+              .set({ value: encryptEnvValue(row.value) })
+              .where(eq(envs.id, row.id));
+          }
+        }
+      } catch (err) {
+        console.log('Notice on auto-encrypt sensitive envs in SQLite:', err);
+      }
+
+      // 6. Clean any leftover mock data
       try {
         await db.runAsync("DELETE FROM envs WHERE id = 'env_uqkayec4';");
       } catch {
@@ -488,7 +519,7 @@ export async function getMobileEnvs(
     folderId: r.folderId,
     folderName: r.folderId ? folderNameMap.get(r.folderId) : undefined,
     key: r.key,
-    value: r.value,
+    value: r.isSecret ? decryptEnvValue(r.value) : r.value,
     isSecret: Boolean(r.isSecret),
     comment: r.comment || undefined,
     createdBy: r.createdBy,
@@ -521,6 +552,8 @@ export async function upsertMobileEnv(data: {
   const isSecret = data.isSecret ?? true;
   const normalizedKey = data.key.toUpperCase().trim();
   const folderId = data.folderId || null;
+  // If sensitive (isSecret is true), never store dry/plain-text in SQLite — encrypt it!
+  const valueToStore = isSecret ? encryptEnvValue(data.value) : data.value;
 
   let targetId = data.id;
 
@@ -557,7 +590,7 @@ export async function upsertMobileEnv(data: {
       environment: data.environment,
       folderId: folderId,
       key: normalizedKey,
-      value: data.value,
+      value: valueToStore,
       isSecret: isSecret,
       comment: data.comment || null,
       createdBy,
@@ -573,7 +606,7 @@ export async function upsertMobileEnv(data: {
         environment: data.environment,
         folderId: folderId,
         key: normalizedKey,
-        value: data.value,
+        value: valueToStore,
         isSecret: isSecret,
         comment: data.comment || null,
         updatedAt: now,
@@ -632,7 +665,13 @@ export async function bulkImportMobileEnvs(
       (value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))
     ) {
-      value = value.slice(1, -1).replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      value = value.slice(1, -1).replace(/\\([\\n"'])/g, (_, esc) => {
+        if (esc === 'n') return '\n';
+        if (esc === '\\') return '\\';
+        if (esc === '"') return '"';
+        if (esc === "'") return "'";
+        return esc;
+      });
     }
 
     await upsertMobileEnv({
@@ -673,6 +712,303 @@ export async function exportMobileEnvsDotEnv(
     })
     .join('\n\n');
 }
+
+/**
+ * Export environment variables from local mobile SQLite as a ZIP archive containing .env files.
+ * Archive structure:
+ *   - <folder_name>/.env
+ *   - root/.env (if root unassigned keys exist)
+ */
+export async function exportMobileEnvsZip(params: {
+  workspaceId: string;
+  teamId: string;
+  environment: 'development' | 'staging' | 'production';
+  folderIds?: string[] | null;
+  teamName?: string;
+  apiBaseUrl?: string;
+}): Promise<{
+  fileName: string;
+  base64: string;
+  folderCount: number;
+  envCount: number;
+}> {
+  const { workspaceId, teamId, environment, folderIds, teamName, apiBaseUrl } = params;
+  const teamNameSlug = (teamName || 'team')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '_')
+    .replace(/_+/g, '_');
+
+  // 1. Sync remote folders & all remote envs from PostgreSQL so local SQLite has full data
+  if (apiBaseUrl) {
+    try {
+      const [foldersRes, envsRes] = await Promise.all([
+        apiClient.get(`${apiBaseUrl}/trpc/folder.list`, {
+          params: {
+            input: JSON.stringify({
+              workspaceId,
+              teamId,
+              environment,
+            }),
+          },
+        }),
+        apiClient.get(`${apiBaseUrl}/trpc/env.list`, {
+          params: {
+            input: JSON.stringify({
+              workspaceId,
+              teamId,
+              environment,
+            }),
+          },
+        }),
+      ]);
+
+      const remoteFolders = foldersRes.data?.result?.data;
+      if (Array.isArray(remoteFolders)) {
+        await syncFoldersFromRemote(workspaceId, teamId, environment, remoteFolders);
+      }
+
+      const remoteEnvs = envsRes.data?.result?.data;
+      if (Array.isArray(remoteEnvs)) {
+        await syncEnvsFromRemote(workspaceId, teamId, environment, remoteEnvs);
+      }
+    } catch (err: any) {
+      console.log('Background remote sync before export skipped (offline or network error):', err?.message || err);
+    }
+  }
+
+  // 2. Fetch all folders from local SQLite
+  const allFolders = await getMobileFolders(workspaceId, teamId, environment);
+  const folderMap = new Map<string, FolderItem>();
+  allFolders.forEach(f => folderMap.set(f.id, f));
+
+  // Determine target folders
+  let targetFolders: FolderItem[] = [];
+  let includeRoot = false;
+
+  if (!folderIds || folderIds.length === 0) {
+    targetFolders = allFolders;
+    includeRoot = true;
+  } else {
+    includeRoot = folderIds.includes('root') || folderIds.includes('unfiled') || folderIds.includes(null as any);
+    targetFolders = allFolders.filter(f => folderIds.includes(f.id));
+  }
+
+  // 3. Fetch all envs from local SQLite (which now includes synced remote envs)
+  const allEnvs = await getMobileEnvs(workspaceId, teamId, environment);
+
+  // Group envs by folderId (null means root)
+  const envsByFolder = new Map<string | null, EnvItem[]>();
+  allEnvs.forEach(e => {
+    const fId = e.folderId || null;
+    if (!envsByFolder.has(fId)) {
+      envsByFolder.set(fId, []);
+    }
+    envsByFolder.get(fId)!.push(e);
+  });
+
+  const zip = new JSZip();
+  let totalExportedEnvs = 0;
+  let totalExportedFolders = 0;
+
+  const formatDotEnv = (items: EnvItem[], folderTitle: string): string => {
+    const header = [
+      `# ==========================================`,
+      `# Env Vault Environment Export`,
+      `# Team: ${teamName || teamId}`,
+      `# Folder: ${folderTitle}`,
+      `# Environment: ${environment}`,
+      `# Exported At: ${new Date().toISOString()}`,
+      `# Total Variables: ${items.length}`,
+      `# ==========================================`,
+      '',
+    ].join('\n');
+
+    const body = items
+      .map(e => {
+        const commentPart = e.comment ? `# ${e.comment}\n` : '';
+        const escapedValue = (e.value ?? '')
+          .replace(/\\/g, '\\\\')
+          .replace(/"/g, '\\"')
+          .replace(/\n/g, '\\n');
+        return `${commentPart}${e.key}="${escapedValue}"`;
+      })
+      .join('\n\n');
+
+    return header + body + '\n';
+  };
+
+  // Add target folders to zip with both standard .env and visible <folder_name>.env
+  for (const folder of targetFolders) {
+    const folderEnvs = envsByFolder.get(folder.id) || [];
+    const sanitizedName = folder.name
+      .trim()
+      .replace(/[/\\?%*:|"<>]/g, '_')
+      .replace(/\s+/g, '_');
+    const dotEnvContent = formatDotEnv(folderEnvs, folder.name);
+
+    const folderZip = zip.folder(sanitizedName);
+    if (folderZip) {
+      // 1. Standard .env file for CLI, Docker, and developer tools
+      folderZip.file('.env', dotEnvContent);
+      // 2. Visible non-hidden .env file for mobile file explorers (which hide dotfiles by default)
+      folderZip.file(`${sanitizedName}.env`, dotEnvContent);
+    } else {
+      zip.file(`${sanitizedName}/.env`, dotEnvContent);
+      zip.file(`${sanitizedName}/${sanitizedName}.env`, dotEnvContent);
+    }
+
+    totalExportedFolders++;
+    totalExportedEnvs += folderEnvs.length;
+  }
+
+  // Add root / unassigned envs if included
+  if (includeRoot) {
+    const rootEnvs = envsByFolder.get(null) || [];
+    if (rootEnvs.length > 0 || (!folderIds || folderIds.length === 0)) {
+      const dotEnvContent = formatDotEnv(rootEnvs, 'Root / Unfiled');
+      const rootZip = zip.folder('root');
+      if (rootZip) {
+        rootZip.file('.env', dotEnvContent);
+        rootZip.file('root.env', dotEnvContent);
+      } else {
+        zip.file('root/.env', dotEnvContent);
+        zip.file('root/root.env', dotEnvContent);
+      }
+      totalExportedFolders++;
+      totalExportedEnvs += rootEnvs.length;
+    }
+  }
+
+  // Add a top-level manifest README.txt
+  const manifestContent = [
+    `==========================================`,
+    `Env Vault Environment Export`,
+    `==========================================`,
+    `Team: ${teamName || teamId}`,
+    `Environment: ${environment.toUpperCase()}`,
+    `Export Date: ${new Date().toISOString()}`,
+    `Folders Exported: ${totalExportedFolders}`,
+    `Variables Exported: ${totalExportedEnvs}`,
+    ``,
+    `Contents:`,
+    ...targetFolders.map(f => `  • ${f.name}/: ${(envsByFolder.get(f.id) || []).length} variables`),
+    includeRoot ? `  • root/: ${(envsByFolder.get(null) || []).length} variables` : '',
+    ``,
+    `Note: Each folder contains:`,
+    `  - .env (standard dotenv file for build tools & deployment)`,
+    `  - <folder_name>.env (visible in mobile/desktop file managers that hide dotfiles by default)`,
+  ].filter(Boolean).join('\n');
+
+  zip.file('README.txt', manifestContent);
+
+  // Name the zip file based on single vs multiple
+  let fileName = `env_vault_${teamNameSlug}_${environment}_envs.zip`;
+  if (folderIds && folderIds.length === 1) {
+    const singleId = folderIds[0];
+    const singleFolder = singleId ? folderMap.get(singleId) : null;
+    const singleName = singleFolder
+      ? singleFolder.name.toLowerCase().replace(/[^a-z0-9_-]/g, '_')
+      : 'root';
+    fileName = `env_vault_${teamNameSlug}_${singleName}_${environment}.zip`;
+  }
+
+  const base64 = await zip.generateAsync({
+    type: 'base64',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 },
+  });
+
+  return {
+    fileName,
+    base64,
+    folderCount: totalExportedFolders,
+    envCount: totalExportedEnvs,
+  };
+}
+
+/**
+ * Download a base64 encoded ZIP archive directly to the user's device.
+ * - On Web: triggers browser download directly.
+ * - On Android: uses StorageAccessFramework to prompt the user to pick a folder (e.g. Downloads),
+ *   and writes the file directly without opening social share sheets.
+ * - On iOS: writes directly to the app document directory.
+ */
+export async function downloadZipToDevice(fileName: string, base64Data: string): Promise<boolean> {
+  if (Platform.OS === 'web') {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return false;
+    }
+    const byteCharacters = atob(base64Data);
+    const byteNumbers = new Array(byteCharacters.length);
+    for (let i = 0; i < byteCharacters.length; i++) {
+      byteNumbers[i] = byteCharacters.charCodeAt(i);
+    }
+    const byteArray = new Uint8Array(byteNumbers);
+    const blob = new Blob([byteArray], { type: 'application/zip' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+  } else if (Platform.OS === 'android') {
+    try {
+      if (FileSystemLegacy.StorageAccessFramework) {
+        const permissions = await FileSystemLegacy.StorageAccessFramework.requestDirectoryPermissionsAsync();
+        if (!permissions.granted) {
+          throw new Error('Storage access was not granted. Please select a folder like Downloads.');
+        }
+
+        const mimeType = 'application/zip';
+        const nameWithoutExt = fileName.replace(/\.zip$/i, '');
+        const createdFileUri = await FileSystemLegacy.StorageAccessFramework.createFileAsync(
+          permissions.directoryUri,
+          nameWithoutExt,
+          mimeType
+        );
+
+        await FileSystemLegacy.StorageAccessFramework.writeAsStringAsync(createdFileUri, base64Data, {
+          encoding: FileSystemLegacy.EncodingType.Base64,
+        });
+
+        return true;
+      }
+    } catch (safErr: any) {
+      if (
+        safErr?.message?.includes('granted') ||
+        safErr?.message?.includes('denied') ||
+        safErr?.message?.includes('permission') ||
+        safErr?.message?.includes('cancel')
+      ) {
+        throw safErr;
+      }
+      console.warn('SAF error, falling back to direct document directory:', safErr?.message || safErr);
+    }
+
+    // Fallback if SAF not supported or failed
+    const fallbackPath = `${FileSystemLegacy.documentDirectory || FileSystemLegacy.cacheDirectory}${fileName}`;
+    await FileSystemLegacy.writeAsStringAsync(fallbackPath, base64Data, {
+      encoding: FileSystemLegacy.EncodingType.Base64,
+    });
+    return true;
+  } else {
+    // iOS: Save directly to app document directory
+    const docPath = `${FileSystemLegacy.documentDirectory || FileSystemLegacy.cacheDirectory}${fileName}`;
+    await FileSystemLegacy.writeAsStringAsync(docPath, base64Data, {
+      encoding: FileSystemLegacy.EncodingType.Base64,
+    });
+    return true;
+  }
+}
+
+/**
+ * Backward compatibility alias for downloadZipToDevice
+ */
+export const saveOrShareZip = downloadZipToDevice;
+
 
 /**
  * Query all raw rows from persistent SQLite using Drizzle ORM for table inspector
@@ -734,6 +1070,33 @@ export async function syncFoldersFromRemote(
   remoteFolders: any[]
 ): Promise<void> {
   const { drizzle } = await ensureDb();
+
+  // 1. Reconcile deletions: remove local folders in this scope absent from remote
+  const remoteFolderIds = remoteFolders.map((rf) => rf.id).filter(Boolean);
+  if (remoteFolderIds.length > 0) {
+    await drizzle
+      .delete(folders)
+      .where(
+        and(
+          eq(folders.workspaceId, workspaceId),
+          eq(folders.teamId, teamId),
+          eq(folders.environment, environment),
+          notInArray(folders.id, remoteFolderIds)
+        )
+      );
+  } else {
+    await drizzle
+      .delete(folders)
+      .where(
+        and(
+          eq(folders.workspaceId, workspaceId),
+          eq(folders.teamId, teamId),
+          eq(folders.environment, environment)
+        )
+      );
+  }
+
+  // 2. Upsert returned folders
   for (const rf of remoteFolders) {
     const createdAtStr = rf.createdAt
       ? typeof rf.createdAt === 'string'
@@ -780,9 +1143,38 @@ export async function syncEnvsFromRemote(
   workspaceId: string,
   teamId: string,
   environment: 'development' | 'staging' | 'production',
-  remoteEnvs: any[]
+  remoteEnvs: any[],
+  folderScope?: string | null
 ): Promise<void> {
   const { drizzle } = await ensureDb();
+
+  // 1. Reconcile deletions: remove local envs in this scope absent from remote
+  const remoteEnvIds = remoteEnvs.map((re) => re.id).filter(Boolean);
+  const scopeConditions = [
+    eq(envs.workspaceId, workspaceId),
+    eq(envs.teamId, teamId),
+    eq(envs.environment, environment),
+  ];
+
+  if (folderScope !== undefined) {
+    if (folderScope === null) {
+      scopeConditions.push(isNull(envs.folderId));
+    } else {
+      scopeConditions.push(eq(envs.folderId, folderScope));
+    }
+  }
+
+  if (remoteEnvIds.length > 0) {
+    await drizzle
+      .delete(envs)
+      .where(and(...scopeConditions, notInArray(envs.id, remoteEnvIds)));
+  } else {
+    await drizzle
+      .delete(envs)
+      .where(and(...scopeConditions));
+  }
+
+  // 2. Upsert returned envs
   for (const re of remoteEnvs) {
     const createdAtStr = re.createdAt
       ? typeof re.createdAt === 'string'
@@ -795,6 +1187,9 @@ export async function syncEnvsFromRemote(
         : new Date(re.updatedAt).toISOString()
       : new Date().toISOString();
 
+    const isSecret = Boolean(re.isSecret);
+    const valueToStore = isSecret ? encryptEnvValue(re.value) : re.value;
+
     await drizzle
       .insert(envs)
       .values({
@@ -804,8 +1199,8 @@ export async function syncEnvsFromRemote(
         environment,
         folderId: re.folderId || null,
         key: re.key,
-        value: re.value,
-        isSecret: Boolean(re.isSecret),
+        value: valueToStore,
+        isSecret: isSecret,
         comment: re.comment || null,
         createdBy: re.createdBy || 'Unknown',
         createdById: re.createdById || null,
@@ -817,8 +1212,8 @@ export async function syncEnvsFromRemote(
         set: {
           folderId: re.folderId || null,
           key: re.key,
-          value: re.value,
-          isSecret: Boolean(re.isSecret),
+          value: valueToStore,
+          isSecret: isSecret,
           comment: re.comment || null,
           createdBy: re.createdBy || 'Unknown',
           createdById: re.createdById || null,

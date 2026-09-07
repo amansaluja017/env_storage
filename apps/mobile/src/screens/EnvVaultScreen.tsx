@@ -10,9 +10,11 @@ import {
   Modal,
   Platform,
   Animated,
+  RefreshControl,
 } from 'react-native';
 import { useForm, Controller } from 'react-hook-form';
 import { Ionicons } from '@expo/vector-icons';
+import { useTourTarget } from 'guideway';
 import { COLORS } from '../theme';
 import {
   initMobileSqlite,
@@ -32,6 +34,7 @@ import {
 } from '../storage/mobileSqlite';
 import { apiClient } from '../utils/apiClient';
 import { SqliteInspectorModal } from '../components/SqliteInspectorModal';
+import { ExportEnvsModal } from '../components/ExportEnvsModal';
 import { showCustomAlert } from '../components/CustomAlert';
 import { FoldersListSkeleton, EnvsListSkeleton } from '../components/Skeleton';
 
@@ -64,6 +67,15 @@ interface RawDotEnvFormData {
   folderId: string;
 }
 
+export interface FolderMenuTarget {
+  id: string;
+  name: string;
+  description?: string;
+  envCount: number;
+  folderObj?: FolderItem | null;
+  isSpecial?: boolean;
+}
+
 export function EnvVaultScreen({
   token,
   workspaceId,
@@ -74,6 +86,11 @@ export function EnvVaultScreen({
   user,
   refreshTrigger,
 }: EnvVaultScreenProps) {
+  const sqliteBadgeTargetRef = useTourTarget('tour-sqlite-badge');
+  const envTabsTargetRef = useTourTarget('tour-env-tabs');
+  const searchBarTargetRef = useTourTarget('tour-search-bar');
+  const newFolderBtnTargetRef = useTourTarget('tour-new-folder-btn');
+
   const [environment, setEnvironment] = useState<'development' | 'staging' | 'production'>('development');
   const [envsList, setEnvsList] = useState<EnvItem[]>([]);
   const [foldersList, setFoldersList] = useState<FolderItem[]>([]);
@@ -82,6 +99,7 @@ export function EnvVaultScreen({
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [savingFolder, setSavingFolder] = useState(false);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [folderMenuTarget, setFolderMenuTarget] = useState<FolderMenuTarget | null>(null);
   const [loading, setLoading] = useState(false);
   const [foldersLoading, setFoldersLoading] = useState(false);
   const [search, setSearch] = useState('');
@@ -104,9 +122,9 @@ export function EnvVaultScreen({
 
     try {
       if (selectedFolderId !== null) {
-        await fetchEnvs();
+        await fetchEnvs(true);
       } else {
-        await fetchFolders();
+        await fetchFolders(true);
       }
     } finally {
       setTimeout(() => setIsRefreshing(false), 300);
@@ -175,6 +193,15 @@ export function EnvVaultScreen({
   const [sqliteModalVisible, setSqliteModalVisible] = useState(false);
   const [dbReady, setDbReady] = useState(false);
 
+  // Export Envs ZIP Modal State
+  const [exportModalVisible, setExportModalVisible] = useState(false);
+  const [exportTargetFolderId, setExportTargetFolderId] = useState<string | null | undefined>(undefined);
+
+  const openExportModal = (targetFolderId?: string | null) => {
+    setExportTargetFolderId(targetFolderId);
+    setExportModalVisible(true);
+  };
+
   useEffect(() => {
     initMobileSqlite()
       .then(() => setDbReady(true))
@@ -219,7 +246,7 @@ export function EnvVaultScreen({
     return false;
   };
 
-  const fetchFolders = async () => {
+  const fetchFolders = async (awaitRemote: boolean = false) => {
     if (!workspaceId || !teamId) return;
     setFoldersLoading(true);
     try {
@@ -232,7 +259,7 @@ export function EnvVaultScreen({
       setVaultStats(stats);
 
       // 2. Background sync: fetch remote folders from PostgreSQL & reconcile into SQLite
-      apiClient
+      const syncPromise = apiClient
         .get(`${apiBaseUrl}/trpc/folder.list`, {
           params: {
             input: JSON.stringify({
@@ -257,6 +284,10 @@ export function EnvVaultScreen({
         .catch((err) => {
           console.log('Background folder sync note:', err?.message || err);
         });
+
+      if (awaitRemote) {
+        await syncPromise;
+      }
     } catch (e) {
       console.log('Error reading Mobile SQLite folders:', e);
     } finally {
@@ -264,7 +295,7 @@ export function EnvVaultScreen({
     }
   };
 
-  const fetchEnvs = async () => {
+  const fetchEnvs = async (awaitRemote: boolean = false) => {
     if (!workspaceId || !teamId || selectedFolderId === null) return;
     setLoading(true);
     try {
@@ -277,7 +308,7 @@ export function EnvVaultScreen({
         selectedFolderId
       );
       setEnvsList(items);
-      await fetchFolders();
+      const foldersPromise = fetchFolders(awaitRemote);
 
       // 2. Background sync: fetch remote envs from PostgreSQL & reconcile into SQLite
       const queryFolderId =
@@ -287,7 +318,7 @@ export function EnvVaultScreen({
           ? null
           : selectedFolderId;
 
-      apiClient
+      const syncPromise = apiClient
         .get(`${apiBaseUrl}/trpc/env.list`, {
           params: {
             input: JSON.stringify({
@@ -301,7 +332,7 @@ export function EnvVaultScreen({
         .then(async (res) => {
           const remoteEnvs = res.data?.result?.data;
           if (Array.isArray(remoteEnvs)) {
-            await syncEnvsFromRemote(workspaceId, teamId, environment, remoteEnvs);
+            await syncEnvsFromRemote(workspaceId, teamId, environment, remoteEnvs, queryFolderId);
             const updated = await getMobileEnvs(
               workspaceId,
               teamId,
@@ -321,6 +352,10 @@ export function EnvVaultScreen({
         .catch((err) => {
           console.log('Background env sync note:', err?.message || err);
         });
+
+      if (awaitRemote) {
+        await Promise.all([syncPromise, foldersPromise]);
+      }
     } catch (e) {
       console.log('Error reading Mobile SQLite envs:', e);
     } finally {
@@ -746,6 +781,7 @@ export function EnvVaultScreen({
       {/* DB Engine Badge & Inspector Trigger (shown in Folders view) */}
       {selectedFolderId === null && (
         <TouchableOpacity
+          ref={sqliteBadgeTargetRef}
           style={styles.engineBar}
           onPress={() => setSqliteModalVisible(true)}
           activeOpacity={0.7}
@@ -759,7 +795,7 @@ export function EnvVaultScreen({
 
       {/* Environment Selector Tabs (shown in Folders view) */}
       {selectedFolderId === null && (
-        <View style={styles.envTabsRow}>
+        <View ref={envTabsTargetRef} style={styles.envTabsRow}>
           {(['development', 'staging', 'production'] as const).map(envName => {
             const isActive = environment === envName;
             return (
@@ -790,22 +826,9 @@ export function EnvVaultScreen({
               <View style={styles.folderCountBadge}>
                 <Text style={styles.folderCountText}>{foldersList.length}</Text>
               </View>
-              <TouchableOpacity
-                style={styles.sectionRefreshBtn}
-                onPress={handleManualRefresh}
-                activeOpacity={0.7}
-                accessibilityLabel="Refresh folders"
-              >
-                <Animated.View style={{ transform: [{ rotate: spin }] }}>
-                  <Ionicons
-                    name="refresh-outline"
-                    size={14}
-                    color={isRefreshing ? COLORS.primary : COLORS.textMuted}
-                  />
-                </Animated.View>
-              </TouchableOpacity>
             </View>
             <TouchableOpacity
+              ref={newFolderBtnTargetRef}
               style={styles.newFolderBtn}
               onPress={openCreateFolder}
               activeOpacity={0.7}
@@ -816,7 +839,7 @@ export function EnvVaultScreen({
           </View>
 
           {/* Search Folders Bar */}
-          <View style={styles.searchBarRow}>
+          <View ref={searchBarTargetRef} style={styles.searchBarRow}>
             <Ionicons name="search" size={15} color={COLORS.textMuted} style={styles.searchIcon} />
             <TextInput
               style={styles.folderSearchInput}
@@ -833,7 +856,18 @@ export function EnvVaultScreen({
           </View>
 
           {/* Folders List or Empty State */}
-          <ScrollView style={styles.listScroll} contentContainerStyle={styles.listContent}>
+          <ScrollView
+            style={styles.listScroll}
+            contentContainerStyle={styles.listContent}
+            refreshControl={
+              <RefreshControl
+                refreshing={isRefreshing}
+                onRefresh={handleManualRefresh}
+                tintColor={COLORS.primary}
+                colors={[COLORS.primary]}
+              />
+            }
+          >
             {/* Root / Unfiled Folder Tile */}
             <TouchableOpacity
               style={styles.folderCard}
@@ -855,7 +889,25 @@ export function EnvVaultScreen({
                 <View style={styles.cardCountBadge}>
                   <Text style={styles.cardCountText}>{vaultStats.rootEnvs} keys</Text>
                 </View>
-                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} style={{ marginLeft: 6 }} />
+                <TouchableOpacity
+                  style={styles.folderCardMenuBtn}
+                  onPress={(e: any) => {
+                    e?.stopPropagation?.();
+                    setFolderMenuTarget({
+                      id: 'root',
+                      name: 'Root / Unfiled',
+                      description: 'Standalone environment variables not categorized in any folder',
+                      envCount: vaultStats.rootEnvs,
+                      folderObj: null,
+                      isSpecial: true,
+                    });
+                  }}
+                  hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
+                  accessibilityLabel="Options for Root folder"
+                >
+                  <Ionicons name="ellipsis-vertical" size={17} color={COLORS.textMuted} />
+                </TouchableOpacity>
+                <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} style={{ marginLeft: 2 }} />
               </View>
             </TouchableOpacity>
 
@@ -869,41 +921,41 @@ export function EnvVaultScreen({
               >
                 <View style={styles.folderCardLeft}>
                   <View style={styles.folderIconBox}>
-                    <Text style={styles.folderIconText}>📂</Text>
+                    <Text style={styles.folderIconText}>📁</Text>
                   </View>
                   <View style={styles.folderCardInfo}>
                     <Text style={styles.folderCardTitle}>{folder.name}</Text>
                     <Text style={styles.folderCardDesc} numberOfLines={1}>
                       {folder.description || 'No description provided'}
                     </Text>
-                    <Text style={styles.folderCardMeta}>By {folder.createdBy}</Text>
+                    <View style={styles.folderMetaRow}>
+                      <Ionicons name="person-outline" size={11} color={COLORS.textMuted} style={{ marginRight: 3 }} />
+                      <Text style={styles.folderCardMeta}>By {folder.createdBy || 'Unknown'}</Text>
+                    </View>
                   </View>
                 </View>
                 <View style={styles.folderCardRight}>
                   <View style={styles.cardCountBadge}>
                     <Text style={styles.cardCountText}>{folder.envCount ?? 0} keys</Text>
                   </View>
-                  {canModify(folder) && (
-                    <View style={styles.folderActionBtnsRow}>
-                      <TouchableOpacity
-                        style={styles.folderCardEditBtn}
-                        onPress={() => openEditFolder(folder)}
-                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                        accessibilityLabel="Edit folder"
-                      >
-                        <Ionicons name="pencil-outline" size={15} color={COLORS.secondary} />
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.folderCardDeleteBtn}
-                        onPress={() => handleDeleteFolder(folder)}
-                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                        accessibilityLabel="Delete folder"
-                      >
-                        <Ionicons name="trash-outline" size={15} color={COLORS.danger} />
-                      </TouchableOpacity>
-                    </View>
-                  )}
-                  <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} style={{ marginLeft: 6 }} />
+                  <TouchableOpacity
+                    style={styles.folderCardMenuBtn}
+                    onPress={(e: any) => {
+                      e?.stopPropagation?.();
+                      setFolderMenuTarget({
+                        id: folder.id,
+                        name: folder.name,
+                        description: folder.description,
+                        envCount: folder.envCount ?? 0,
+                        folderObj: folder,
+                      });
+                    }}
+                    hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
+                    accessibilityLabel={`Options for ${folder.name}`}
+                  >
+                    <Ionicons name="ellipsis-vertical" size={17} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                  <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} style={{ marginLeft: 2 }} />
                 </View>
               </TouchableOpacity>
             ))}
@@ -945,35 +997,89 @@ export function EnvVaultScreen({
                 <View style={[styles.cardCountBadge, { backgroundColor: 'rgba(99, 102, 241, 0.2)' }]}>
                   <Text style={[styles.cardCountText, { color: '#818cf8' }]}>{vaultStats.totalEnvs} keys</Text>
                 </View>
-                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} style={{ marginLeft: 6 }} />
+                <TouchableOpacity
+                  style={styles.folderCardMenuBtn}
+                  onPress={(e: any) => {
+                    e?.stopPropagation?.();
+                    setFolderMenuTarget({
+                      id: 'all',
+                      name: 'All Variables',
+                      description: 'All variables across all folders',
+                      envCount: vaultStats.totalEnvs,
+                      folderObj: null,
+                      isSpecial: true,
+                    });
+                  }}
+                  hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
+                  accessibilityLabel="Options for All Variables"
+                >
+                  <Ionicons name="ellipsis-vertical" size={17} color={COLORS.textMuted} />
+                </TouchableOpacity>
+                <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} style={{ marginLeft: 2 }} />
               </View>
             </TouchableOpacity>
           </ScrollView>
 
-          {/* Folders Bottom Actions Bar */}
-          <View style={styles.foldersBottomActions}>
+          {/* Redesigned Vault Bottom Actions Dock */}
+          <View style={styles.vaultFooterDock}>
+            {/* 1. Add Key Action */}
             <TouchableOpacity
-              style={styles.actionPillBtn}
-              onPress={openCreateFolder}
-            >
-              <Ionicons name="folder-outline" size={14} color={COLORS.secondary} style={{ marginRight: 6 }} />
-              <Text style={styles.actionPillText}>+ New Folder</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.actionPillBtn, { borderColor: COLORS.primary }]}
+              style={styles.dockActionBtn}
               onPress={() => openAdd('')}
+              activeOpacity={0.65}
+              accessibilityLabel="Add new environment variable"
             >
-              <Ionicons name="add" size={16} color={COLORS.primary} style={{ marginRight: 4 }} />
-              <Text style={[styles.actionPillText, { color: COLORS.primary }]}>+ Add Key</Text>
+              <View style={[styles.dockIconBadge, styles.dockIconBadgeEmerald]}>
+                <Ionicons name="add" size={20} color={COLORS.primary} />
+              </View>
+              <Text style={styles.dockActionLabel} numberOfLines={1}>
+                Add Key
+              </Text>
             </TouchableOpacity>
 
+            {/* 2. New Folder Action */}
             <TouchableOpacity
-              style={styles.actionPillBtn}
-              onPress={openRawModal}
+              style={styles.dockActionBtn}
+              onPress={openCreateFolder}
+              activeOpacity={0.65}
+              accessibilityLabel="Create new folder"
             >
-              <Ionicons name="document-text-outline" size={14} color={COLORS.textMuted} style={{ marginRight: 4 }} />
-              <Text style={styles.actionPillText}>Import .env</Text>
+              <View style={[styles.dockIconBadge, styles.dockIconBadgeCyan]}>
+                <Ionicons name="folder-outline" size={18} color={COLORS.secondary} />
+              </View>
+              <Text style={styles.dockActionLabel} numberOfLines={1}>
+                New Folder
+              </Text>
+            </TouchableOpacity>
+
+            {/* 3. Import .env Action */}
+            <TouchableOpacity
+              style={styles.dockActionBtn}
+              onPress={openRawModal}
+              activeOpacity={0.65}
+              accessibilityLabel="Import raw dot env"
+            >
+              <View style={[styles.dockIconBadge, styles.dockIconBadgePurple]}>
+                <Ionicons name="cloud-upload-outline" size={18} color="#a78bfa" />
+              </View>
+              <Text style={styles.dockActionLabel} numberOfLines={1}>
+                Import .env
+              </Text>
+            </TouchableOpacity>
+
+            {/* 4. Backup Vault Action */}
+            <TouchableOpacity
+              style={styles.dockActionBtn}
+              onPress={() => openExportModal(null)}
+              activeOpacity={0.65}
+              accessibilityLabel="Backup vault environments as zip archive"
+            >
+              <View style={[styles.dockIconBadge, styles.dockIconBadgeAmber]}>
+                <Ionicons name="shield-checkmark-outline" size={18} color="#f59e0b" />
+              </View>
+              <Text style={styles.dockActionLabel} numberOfLines={1}>
+                Backup
+              </Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1036,26 +1142,45 @@ export function EnvVaultScreen({
                 </View>
               </View>
 
-              {activeFolderObj && canModify(activeFolderObj) && (
-                <View style={styles.bannerFolderActionsRow}>
-                  <TouchableOpacity
-                    style={styles.bannerEditFolderBtn}
-                    onPress={() => openEditFolder(activeFolderObj)}
-                    accessibilityLabel="Edit folder"
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons name="pencil-outline" size={14} color={COLORS.secondary} />
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.bannerDeleteFolderBtn}
-                    onPress={() => handleDeleteFolder(activeFolderObj)}
-                    accessibilityLabel="Delete folder"
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons name="trash-outline" size={14} color={COLORS.danger} />
-                  </TouchableOpacity>
-                </View>
-              )}
+              <View style={styles.bannerFolderActionsRow}>
+                <TouchableOpacity
+                  style={styles.folderCardMenuBtn}
+                  onPress={() => {
+                    if (selectedFolderId === 'root') {
+                      setFolderMenuTarget({
+                        id: 'root',
+                        name: 'Root / Unfiled',
+                        description: 'Standalone environment variables not categorized in any folder',
+                        envCount: filteredEnvs.length,
+                        folderObj: null,
+                        isSpecial: true,
+                      });
+                    } else if (selectedFolderId === 'all') {
+                      setFolderMenuTarget({
+                        id: 'all',
+                        name: 'All Variables',
+                        description: 'All variables across all folders',
+                        envCount: filteredEnvs.length,
+                        folderObj: null,
+                        isSpecial: true,
+                      });
+                    } else if (activeFolderObj) {
+                      setFolderMenuTarget({
+                        id: activeFolderObj.id,
+                        name: activeFolderObj.name,
+                        description: activeFolderObj.description,
+                        envCount: filteredEnvs.length,
+                        folderObj: activeFolderObj,
+                      });
+                    }
+                  }}
+                  hitSlop={{ top: 12, bottom: 12, left: 10, right: 10 }}
+                  activeOpacity={0.7}
+                  accessibilityLabel="Folder options"
+                >
+                  <Ionicons name="ellipsis-vertical" size={17} color={COLORS.textMuted} />
+                </TouchableOpacity>
+              </View>
             </View>
 
             {activeFolderObj?.description ? (
@@ -1116,7 +1241,18 @@ export function EnvVaultScreen({
               </TouchableOpacity>
             </View>
           ) : (
-            <ScrollView style={styles.listScroll} contentContainerStyle={styles.listContent}>
+            <ScrollView
+              style={styles.listScroll}
+              contentContainerStyle={styles.listContent}
+              refreshControl={
+                <RefreshControl
+                  refreshing={isRefreshing}
+                  onRefresh={handleManualRefresh}
+                  tintColor={COLORS.primary}
+                  colors={[COLORS.primary]}
+                />
+              }
+            >
               {filteredEnvs.map(item => {
                 const isRevealed = revealedIds[item.id];
                 const displayValue = item.isSecret && !isRevealed ? '••••••••••••••••' : item.value;
@@ -1506,10 +1642,159 @@ export function EnvVaultScreen({
         </View>
       </Modal>
 
+      {/* Folder Action Sheet / Menu Modal */}
+      <Modal
+        visible={!!folderMenuTarget}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setFolderMenuTarget(null)}
+      >
+        <TouchableOpacity
+          style={styles.menuBackdrop}
+          activeOpacity={1}
+          onPress={() => setFolderMenuTarget(null)}
+        >
+          <View
+            style={styles.menuSheetCard}
+            onStartShouldSetResponder={() => true}
+          >
+            {/* Grabber indicator */}
+            <View style={styles.sheetHandleBar} />
+
+            {/* Folder Header */}
+            <View style={styles.menuHeaderRow}>
+              <View style={styles.menuHeaderIconBox}>
+                <Text style={{ fontSize: 20 }}>
+                  {folderMenuTarget?.id === 'root'
+                    ? '📄'
+                    : folderMenuTarget?.id === 'all'
+                    ? '🗄️'
+                    : '📁'}
+                </Text>
+              </View>
+              <View style={styles.menuHeaderTextCol}>
+                <Text style={styles.menuHeaderTitle} numberOfLines={1}>
+                  {folderMenuTarget?.name}
+                </Text>
+                <Text style={styles.menuHeaderSubtitle} numberOfLines={1}>
+                  {folderMenuTarget?.envCount ?? 0} {folderMenuTarget?.envCount === 1 ? 'variable' : 'variables'}
+                  {folderMenuTarget?.folderObj?.createdBy ? ` • By ${folderMenuTarget.folderObj.createdBy}` : ''}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.menuCloseBtn}
+                onPress={() => setFolderMenuTarget(null)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Ionicons name="close" size={18} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.menuDivider} />
+
+            {/* Menu Options */}
+            <View style={styles.menuOptionsList}>
+              {/* Option 1: Backup to .zip */}
+              <TouchableOpacity
+                style={styles.menuOptionItem}
+                onPress={() => {
+                  const targetId = folderMenuTarget?.id;
+                  setFolderMenuTarget(null);
+                  openExportModal(targetId === 'all' ? null : targetId);
+                }}
+                activeOpacity={0.7}
+              >
+                <View style={[styles.menuOptionIconBox, { backgroundColor: 'rgba(16, 185, 129, 0.12)' }]}>
+                  <Ionicons name="shield-checkmark-outline" size={18} color={COLORS.primary} />
+                </View>
+                <View style={styles.menuOptionTextCol}>
+                  <Text style={styles.menuOptionTitle}>Backup to .zip</Text>
+                  <Text style={styles.menuOptionSubtitle}>
+                    Download variables directly to device storage
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} />
+              </TouchableOpacity>
+
+              {/* Option 2: Edit Folder (if custom folder & user has permission) */}
+              {folderMenuTarget?.folderObj && canModify(folderMenuTarget.folderObj) && (
+                <TouchableOpacity
+                  style={styles.menuOptionItem}
+                  onPress={() => {
+                    const obj = folderMenuTarget.folderObj!;
+                    setFolderMenuTarget(null);
+                    openEditFolder(obj);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.menuOptionIconBox, { backgroundColor: 'rgba(6, 182, 212, 0.12)' }]}>
+                    <Ionicons name="pencil-outline" size={18} color={COLORS.secondary} />
+                  </View>
+                  <View style={styles.menuOptionTextCol}>
+                    <Text style={styles.menuOptionTitle}>Edit Folder</Text>
+                    <Text style={styles.menuOptionSubtitle}>
+                      Rename folder or change its description
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} />
+                </TouchableOpacity>
+              )}
+
+              {/* Option 3: Delete Folder (if custom folder & user has permission) */}
+              {folderMenuTarget?.folderObj && canModify(folderMenuTarget.folderObj) && (
+                <TouchableOpacity
+                  style={[styles.menuOptionItem, styles.menuOptionItemDanger]}
+                  onPress={() => {
+                    const obj = folderMenuTarget.folderObj!;
+                    setFolderMenuTarget(null);
+                    handleDeleteFolder(obj);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.menuOptionIconBox, { backgroundColor: 'rgba(239, 68, 68, 0.12)' }]}>
+                    <Ionicons name="trash-outline" size={18} color={COLORS.danger} />
+                  </View>
+                  <View style={styles.menuOptionTextCol}>
+                    <Text style={[styles.menuOptionTitle, { color: COLORS.danger }]}>Delete Folder</Text>
+                    <Text style={styles.menuOptionSubtitle}>
+                      Variables inside will be moved to Root (Unfiled)
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={COLORS.danger} />
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {/* Cancel Button */}
+            <TouchableOpacity
+              style={styles.menuCancelBtn}
+              onPress={() => setFolderMenuTarget(null)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.menuCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
       {/* In-App SQLite DB Inspector Modal */}
       <SqliteInspectorModal
         visible={sqliteModalVisible}
         onClose={() => setSqliteModalVisible(false)}
+      />
+
+      {/* Export Envs ZIP Modal */}
+      <ExportEnvsModal
+        visible={exportModalVisible}
+        onClose={() => setExportModalVisible(false)}
+        workspaceId={workspaceId}
+        teamId={teamId}
+        teamName={team?.name}
+        environment={environment}
+        folders={foldersList}
+        rootCount={vaultStats.rootEnvs}
+        initialFolderId={exportTargetFolderId}
+        apiBaseUrl={apiBaseUrl}
       />
     </View>
   );
@@ -1610,17 +1895,6 @@ const styles = StyleSheet.create({
     color: COLORS.secondary,
     fontSize: 10,
     fontWeight: '800',
-  },
-  sectionRefreshBtn: {
-    width: 26,
-    height: 26,
-    borderRadius: 6,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: 8,
   },
   navRefreshBtn: {
     width: 28,
@@ -1739,17 +2013,21 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
   },
-  folderActionBtnsRow: {
+  folderCardMenuBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 8,
+  },
+  folderMetaRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginLeft: 6,
-  },
-  folderCardEditBtn: {
-    padding: 6,
-    marginRight: 2,
-  },
-  folderCardDeleteBtn: {
-    padding: 6,
+    marginTop: 3,
   },
   emptyFolderBox: {
     backgroundColor: COLORS.card,
@@ -1791,29 +2069,60 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontSize: 12,
   },
-  foldersBottomActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
-  },
-  actionPillBtn: {
-    flex: 1,
+  vaultFooterDock: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.card,
-    borderRadius: 8,
-    paddingVertical: 10,
-    marginHorizontal: 3,
+    justifyContent: 'space-between',
+    backgroundColor: '#121217',
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: COLORS.border,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    marginTop: 10,
+    marginBottom: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
   },
-  actionPillText: {
-    color: COLORS.text,
-    fontSize: 12,
+  dockActionBtn: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 4,
+  },
+  dockIconBadge: {
+    width: 42,
+    height: 42,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+    borderWidth: 1,
+  },
+  dockIconBadgeEmerald: {
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+  },
+  dockIconBadgeCyan: {
+    backgroundColor: 'rgba(6, 182, 212, 0.12)',
+    borderColor: 'rgba(6, 182, 212, 0.3)',
+  },
+  dockIconBadgePurple: {
+    backgroundColor: 'rgba(139, 92, 246, 0.12)',
+    borderColor: 'rgba(139, 92, 246, 0.3)',
+  },
+  dockIconBadgeAmber: {
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    borderColor: 'rgba(245, 158, 11, 0.3)',
+  },
+  dockActionLabel: {
+    color: '#e4e4e7',
+    fontSize: 11,
     fontWeight: '700',
+    letterSpacing: -0.1,
   },
 
   // Breadcrumb Navigation Bar Styles
@@ -1926,20 +2235,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-  },
-  bannerEditFolderBtn: {
-    padding: 6,
-    borderRadius: 6,
-    backgroundColor: 'rgba(6, 182, 212, 0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(6, 182, 212, 0.25)',
-  },
-  bannerDeleteFolderBtn: {
-    padding: 6,
-    borderRadius: 6,
-    backgroundColor: 'rgba(239, 68, 68, 0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.25)',
   },
 
   // Folder Picker in Modals
@@ -2302,5 +2597,118 @@ const styles = StyleSheet.create({
     fontSize: 11,
     marginTop: -2,
     marginBottom: 6,
+  },
+
+  // Folder Menu Action Sheet Modal
+  menuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.72)',
+    justifyContent: 'flex-end',
+  },
+  menuSheetCard: {
+    backgroundColor: '#0f172a',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    paddingTop: 12,
+    paddingHorizontal: 18,
+    paddingBottom: Platform.OS === 'ios' ? 36 : 24,
+  },
+  sheetHandleBar: {
+    width: 38,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(255, 255, 255, 0.25)',
+    alignSelf: 'center',
+    marginBottom: 16,
+  },
+  menuHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  menuHeaderIconBox: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  menuHeaderTextCol: {
+    flex: 1,
+  },
+  menuHeaderTitle: {
+    color: COLORS.text,
+    fontSize: 17,
+    fontWeight: '700',
+  },
+  menuHeaderSubtitle: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    marginTop: 3,
+  },
+  menuCloseBtn: {
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+  },
+  menuDivider: {
+    height: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    marginBottom: 14,
+  },
+  menuOptionsList: {
+    gap: 10,
+    marginBottom: 16,
+  },
+  menuOptionItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderRadius: 14,
+    padding: 13,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  menuOptionItemDanger: {
+    borderColor: 'rgba(239, 68, 68, 0.25)',
+    backgroundColor: 'rgba(239, 68, 68, 0.05)',
+  },
+  menuOptionIconBox: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  menuOptionTextCol: {
+    flex: 1,
+  },
+  menuOptionTitle: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  menuOptionSubtitle: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  menuCancelBtn: {
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+  },
+  menuCancelText: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: '600',
   },
 });

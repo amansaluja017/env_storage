@@ -13,9 +13,11 @@ import {
 } from 'react-native';
 import { useForm, Controller } from 'react-hook-form';
 import { Ionicons } from '@expo/vector-icons';
+import { useTourTarget } from 'guideway';
 import { COLORS } from '../theme';
 import { apiClient } from '../utils/apiClient';
 import { showCustomAlert } from '../components/CustomAlert';
+import * as Clipboard from 'expo-clipboard';
 import { MembersListSkeleton } from '../components/Skeleton';
 
 interface TeamMember {
@@ -40,12 +42,24 @@ function formatJoinedDate(dateStr?: string | Date): string {
   }
 }
 
+function formatInviteDate(dateStr?: string | Date): string {
+  if (!dateStr) return 'Invited recently';
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return 'Invited recently';
+    return `Invited ${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+  } catch {
+    return 'Invited recently';
+  }
+}
+
 interface TeamInvite {
   id: string;
   email: string;
   role: 'admin' | 'member';
   inviteCode: string;
   status: 'pending' | 'accepted' | 'expired';
+  createdAt?: string | Date;
 }
 
 export interface WorkspaceItem {
@@ -100,6 +114,10 @@ export function TeamScreen({
   onTeamUpdated,
   onTeamDeleted,
 }: TeamScreenProps) {
+  const inviteBtnTargetRef = useTourTarget('tour-invite-btn');
+  const manageTeamBtnTargetRef = useTourTarget('tour-manage-team-btn');
+  const membersHeaderTargetRef = useTourTarget('tour-members-header');
+
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [invites, setInvites] = useState<TeamInvite[]>([]);
   const [loading, setLoading] = useState(false);
@@ -239,6 +257,24 @@ export function TeamScreen({
       fetchTeamData();
     }
   }, [refreshTrigger]);
+
+  const handleCopyInviteLink = async (inviteCode: string) => {
+    try {
+      const inviteUrl = `${apiBaseUrl}/auth/accept-invite?token=${inviteCode}`;
+      await Clipboard.setStringAsync(inviteUrl);
+      showCustomAlert({
+        title: 'Link Copied! 📋',
+        message: 'The invitation link has been copied to your clipboard. You can share it directly with your teammate.',
+        type: 'success',
+      });
+    } catch {
+      showCustomAlert({
+        title: 'Copy Error',
+        message: 'Failed to copy invite link to clipboard.',
+        type: 'danger',
+      });
+    }
+  };
 
   const onSendInvite = async (formData: InviteFormData) => {
     if (!selectedInviteWsId) {
@@ -475,6 +511,7 @@ export function TeamScreen({
       {/* Top Banner Actions */}
       <View style={styles.actionBanner}>
         <TouchableOpacity
+          ref={inviteBtnTargetRef}
           style={styles.inviteBtn}
           onPress={openInviteModal}
           activeOpacity={0.8}
@@ -485,6 +522,7 @@ export function TeamScreen({
 
         {isCurrentAdmin && (
           <TouchableOpacity
+            ref={manageTeamBtnTargetRef}
             style={styles.manageTeamBtn}
             onPress={openManageTeamModal}
             activeOpacity={0.8}
@@ -502,7 +540,7 @@ export function TeamScreen({
       ) : (
         <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent}>
           {/* Members List Header with In-Section Refresh */}
-          <View style={styles.sectionHeaderRow}>
+          <View ref={membersHeaderTargetRef} style={styles.sectionHeaderRow}>
             <Text style={styles.sectionHeader}>ACTIVE TEAM MEMBERS ({members.length})</Text>
             <TouchableOpacity
               style={styles.refreshSectionBtn}
@@ -660,35 +698,132 @@ export function TeamScreen({
             })
           )}
 
-          {/* Pending Invites List */}
-          <Text style={[styles.sectionHeader, { marginTop: 24 }]}>
-            PENDING INVITES ({invites.filter(i => i.status === 'pending').length})
-          </Text>
+          {/* Redesigned Pending Invites Section */}
+          <View style={styles.invitesSectionHeaderRow}>
+            <View style={styles.invitesSectionTitleGroup}>
+              <View style={styles.invitesSectionIconBox}>
+                <Ionicons name="mail-outline" size={13} color={COLORS.warning} />
+              </View>
+              <Text style={styles.invitesSectionHeader}>PENDING INVITATIONS</Text>
+              <View style={styles.invitesCountBadge}>
+                <Text style={styles.invitesCountText}>
+                  {invites.filter(i => i.status === 'pending').length}
+                </Text>
+              </View>
+            </View>
 
-          {invites.length === 0 ? (
-            <View style={styles.emptyCard}>
-              <Ionicons name="mail-unread-outline" size={24} color={COLORS.textMuted} />
-              <Text style={styles.noInvitesText}>No pending invitations for this team</Text>
+            {isCurrentAdmin && (
+              <TouchableOpacity
+                style={styles.invitesQuickAddBtn}
+                onPress={openInviteModal}
+                activeOpacity={0.7}
+                accessibilityLabel="Invite member"
+              >
+                <Ionicons name="person-add-outline" size={12} color={COLORS.secondary} style={{ marginRight: 4 }} />
+                <Text style={styles.invitesQuickAddBtnText}>+ Invite</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          {invites.filter(i => i.status === 'pending').length === 0 ? (
+            <View style={styles.emptyInvitesCard}>
+              <View style={styles.emptyInvitesIconCircle}>
+                <Ionicons name="mail-open-outline" size={22} color={COLORS.textMuted} />
+              </View>
+              <Text style={styles.emptyInvitesTitle}>No Pending Invitations</Text>
+              <Text style={styles.emptyInvitesDesc}>
+                All invited teammates have joined or no invitations are currently pending.
+              </Text>
             </View>
           ) : (
-            invites.map(inv => (
-              <View key={inv.id} style={styles.inviteCard}>
-                <View style={styles.inviteLeft}>
-                  <View style={styles.inviteIconBox}>
-                    <Ionicons name="mail-outline" size={16} color={COLORS.secondary} />
-                  </View>
-                  <View>
-                    <Text style={styles.inviteEmail}>{inv.email}</Text>
-                    <View style={styles.codeBadge}>
-                      <Text style={styles.inviteCode}>CODE: {inv.inviteCode}</Text>
+            invites
+              .filter(i => i.status === 'pending')
+              .map(inv => {
+                const initial = (inv.email || 'U').charAt(0).toUpperCase();
+                const isAdmin = inv.role === 'admin';
+                return (
+                  <View key={inv.id} style={styles.redesignedInviteCard}>
+                    <View style={styles.inviteCardTopRow}>
+                      {/* Avatar with soft amber glowing theme */}
+                      <View style={styles.inviteAvatarBox}>
+                        <Text style={styles.inviteAvatarText}>{initial}</Text>
+                      </View>
+
+                      {/* Info: Email, Role & Date (NO code shown!) */}
+                      <View style={styles.inviteInfoBox}>
+                        <Text style={styles.inviteEmailText} numberOfLines={1}>
+                          {inv.email}
+                        </Text>
+                        <View style={styles.inviteMetaRow}>
+                          <View
+                            style={[
+                              styles.inviteRolePill,
+                              isAdmin ? styles.inviteRolePillAdmin : styles.inviteRolePillMember,
+                            ]}
+                          >
+                            <View
+                              style={[
+                                styles.inviteRoleDot,
+                                isAdmin ? styles.inviteRoleDotAdmin : styles.inviteRoleDotMember,
+                              ]}
+                            />
+                            <Text
+                              style={[
+                                styles.inviteRoleText,
+                                isAdmin ? styles.inviteRoleTextAdmin : styles.inviteRoleTextMember,
+                              ]}
+                            >
+                              {isAdmin ? 'ADMIN' : 'MEMBER'}
+                            </Text>
+                          </View>
+                          <Text style={styles.inviteMetaBullet}>•</Text>
+                          <View style={styles.inviteDateBox}>
+                            <Ionicons
+                              name="time-outline"
+                              size={11}
+                              color={COLORS.textMuted}
+                              style={{ marginRight: 3 }}
+                            />
+                            <Text style={styles.inviteDateText}>
+                              {formatInviteDate(inv.createdAt)}
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+
+                      {/* Status Tag */}
+                      <View style={styles.inviteStatusPill}>
+                        <View style={styles.inviteStatusDot} />
+                        <Text style={styles.inviteStatusLabel}>PENDING</Text>
+                      </View>
                     </View>
+
+                    {/* Action Bar: Copy Invite Link */}
+                    {isCurrentAdmin && (
+                      <View style={styles.inviteActionBar}>
+                        <TouchableOpacity
+                          style={styles.copyLinkBtn}
+                          onPress={() => handleCopyInviteLink(inv.inviteCode)}
+                          activeOpacity={0.7}
+                          accessibilityLabel="Copy invitation link"
+                        >
+                          <Ionicons
+                            name="link-outline"
+                            size={13}
+                            color={COLORS.primary}
+                            style={{ marginRight: 5 }}
+                          />
+                          <Text style={styles.copyLinkBtnText}>Copy Invite Link</Text>
+                        </TouchableOpacity>
+
+                        <Text style={styles.inviteLinkHintText}>
+                          Link ready to share with {inv.email.split('@')[0]}
+                        </Text>
+                      </View>
+                    )}
                   </View>
-                </View>
-                <View style={styles.inviteStatusBadge}>
-                  <Text style={styles.inviteStatusText}>{inv.status.toUpperCase()}</Text>
-                </View>
-              </View>
-            ))
+                );
+              })
           )}
         </ScrollView>
       )}
@@ -1430,66 +1565,246 @@ const styles = StyleSheet.create({
     marginTop: 8,
     marginBottom: 4,
   },
-  inviteCard: {
+  // Redesigned Pending Invites Styles
+  invitesSectionHeaderRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: COLORS.card,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 12,
-    marginBottom: 8,
+    justifyContent: 'space-between',
+    marginTop: 28,
+    marginBottom: 12,
   },
-  inviteLeft: {
+  invitesSectionTitleGroup: {
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
   },
-  inviteIconBox: {
-    width: 36,
-    height: 36,
+  invitesSectionIconBox: {
+    width: 24,
+    height: 24,
+    borderRadius: 7,
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.25)',
+  },
+  invitesSectionHeader: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  invitesCountBadge: {
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
     borderRadius: 10,
-    backgroundColor: 'rgba(6, 182, 212, 0.12)',
+    marginLeft: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.3)',
+  },
+  invitesCountText: {
+    color: COLORS.warning,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  invitesQuickAddBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(6, 182, 212, 0.1)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 7,
     borderWidth: 1,
     borderColor: 'rgba(6, 182, 212, 0.25)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
   },
-  inviteEmail: {
-    color: COLORS.text,
-    fontSize: 14,
-    fontWeight: '700',
-  },
-  codeBadge: {
-    backgroundColor: COLORS.surface,
-    borderRadius: 5,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    alignSelf: 'flex-start',
-    marginTop: 4,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  inviteCode: {
+  invitesQuickAddBtnText: {
     color: COLORS.secondary,
     fontSize: 11,
     fontWeight: '700',
-    letterSpacing: 0.5,
   },
-  inviteStatusBadge: {
-    backgroundColor: COLORS.surface,
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+  emptyInvitesCard: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 26,
+    backgroundColor: COLORS.card,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    marginBottom: 12,
+  },
+  emptyInvitesIconCircle: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 10,
     borderWidth: 1,
     borderColor: COLORS.border,
   },
-  inviteStatusText: {
+  emptyInvitesTitle: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  emptyInvitesDesc: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 18,
+    maxWidth: 290,
+  },
+  redesignedInviteCard: {
+    backgroundColor: COLORS.card,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 14,
+    marginBottom: 10,
+  },
+  inviteCardTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  inviteAvatarBox: {
+    width: 38,
+    height: 38,
+    borderRadius: 11,
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 11,
+  },
+  inviteAvatarText: {
+    color: COLORS.warning,
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  inviteInfoBox: {
+    flex: 1,
+    marginRight: 8,
+  },
+  inviteEmailText: {
+    color: COLORS.text,
+    fontSize: 14,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  inviteMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+  },
+  inviteRolePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 5,
+    borderWidth: 1,
+  },
+  inviteRolePillAdmin: {
+    backgroundColor: 'rgba(6, 182, 212, 0.1)',
+    borderColor: 'rgba(6, 182, 212, 0.3)',
+  },
+  inviteRolePillMember: {
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderColor: COLORS.border,
+  },
+  inviteRoleDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    marginRight: 4,
+  },
+  inviteRoleDotAdmin: {
+    backgroundColor: COLORS.secondary,
+  },
+  inviteRoleDotMember: {
+    backgroundColor: COLORS.textMuted,
+  },
+  inviteRoleText: {
+    fontSize: 9.5,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  inviteRoleTextAdmin: {
+    color: COLORS.secondary,
+  },
+  inviteRoleTextMember: {
+    color: COLORS.textSubtle,
+  },
+  inviteMetaBullet: {
+    color: COLORS.textMuted,
+    marginHorizontal: 6,
+    fontSize: 11,
+  },
+  inviteDateBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  inviteDateText: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+  },
+  inviteStatusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+    borderColor: 'rgba(245, 158, 11, 0.28)',
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  inviteStatusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.warning,
+    marginRight: 5,
+  },
+  inviteStatusLabel: {
     color: COLORS.warning,
     fontSize: 10,
     fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  inviteActionBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.06)',
+  },
+  copyLinkBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.25)',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  copyLinkBtnText: {
+    color: COLORS.primary,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  inviteLinkHintText: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontStyle: 'italic',
   },
   modalOverlay: {
     flex: 1,

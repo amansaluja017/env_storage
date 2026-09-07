@@ -63,6 +63,14 @@ export const teamRouter = router({
       })
     )
     .mutation(async ({ ctx, input }) => {
+      const team = await dataStore.getTeamById(input.teamId);
+      if (!team || team.workspaceId !== input.workspaceId) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Specified team does not exist or does not belong to this workspace.',
+        });
+      }
+
       const isWsAdmin = await dataStore.isWorkspaceAdmin(input.workspaceId, ctx.user.id);
       const role = await dataStore.getUserRoleInTeam(input.teamId, ctx.user.id);
       if (!isWsAdmin && (!role || role !== 'admin')) {
@@ -72,7 +80,6 @@ export const teamRouter = router({
         });
       }
 
-      const team = await dataStore.getTeamById(input.teamId);
       const ws = await dataStore.getWorkspaceById(input.workspaceId);
 
       const invite = await dataStore.createInvite({
@@ -83,9 +90,15 @@ export const teamRouter = router({
         invitedBy: ctx.user.id,
       });
 
-      const host = ctx.req.get('host') || 'localhost:4000';
-      const protocol = ctx.req.protocol || 'http';
-      const apiHost = process.env.API_PUBLIC_URL || `${protocol}://${host}`;
+      let apiHost = process.env.API_PUBLIC_URL || process.env.APP_PUBLIC_URL;
+      if (!apiHost) {
+        const rawHost = ctx.req.get('host') || 'localhost:4000';
+        const allowedHosts = ['localhost:4000', '127.0.0.1:4000', '10.0.2.2:4000'];
+        const host = allowedHosts.includes(rawHost) ? rawHost : 'localhost:4000';
+        const protocol = ctx.req.protocol === 'https' ? 'https' : 'http';
+        apiHost = `${protocol}://${host}`;
+      }
+      apiHost = apiHost.replace(/\/+$/, '');
       const inviteUrl = `${apiHost}/auth/accept-invite?token=${invite.inviteCode}`;
 
       await sendTeamInvitationEmail(

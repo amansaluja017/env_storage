@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
+import JSZip from 'jszip';
 import {
   pgDb,
   users,
@@ -17,7 +18,12 @@ import {
   isNull,
   inArray,
 } from '@tubo/db';
-import { tokenStore } from './tokenStore.js';
+import { tokenStore, hashToken } from './tokenStore.js';
+import {
+  encryptEnvValue,
+  decryptEnvValue,
+  isEncryptedEnvValue,
+} from '../utils/vaultCrypto.js';
 
 export interface WorkspaceItem {
   id: string;
@@ -595,29 +601,31 @@ export const dataStore = {
     invitedBy: string;
   }): Promise<TeamInviteItem> {
     const code = 'INV-TUBO-' + crypto.randomBytes(16).toString('hex').toUpperCase();
+    const hashedCode = hashToken(code);
     const newInvite = {
       id: crypto.randomUUID(),
       teamId: inv.teamId,
       workspaceId: inv.workspaceId,
       email: inv.email.toLowerCase().trim(),
       role: inv.role,
-      inviteCode: code,
+      inviteCode: hashedCode,
       status: 'pending' as const,
       invitedBy: inv.invitedBy,
       createdAt: new Date(),
     };
     await pgDb.insert(teamInvites).values(newInvite);
-    // Persist inviteToken in tokens table with strict 1-hour expiry
+    // Persist inviteToken in tokens table with strict 1-hour expiry (propagate error if fails)
     await tokenStore.createToken({
       userId: inv.invitedBy,
       type: 'inviteToken',
       token: code,
       expiresInMs: 60 * 60 * 1000, // 1 hour
       metadata: { teamId: inv.teamId, workspaceId: inv.workspaceId, email: inv.email, role: inv.role },
-    }).catch(err => {
-      console.warn('Failed to persist inviteToken in tokens table:', err?.message || err);
     });
-    return newInvite;
+    return {
+      ...newInvite,
+      inviteCode: code, // Retain raw code for URL generation
+    };
   },
 
   async getInvitesForTeam(teamId: string): Promise<TeamInviteItem[]> {
@@ -646,7 +654,7 @@ export const dataStore = {
     const invites = await pgDb
       .select()
       .from(teamInvites)
-      .where(eq(teamInvites.inviteCode, inviteCode));
+      .where(eq(teamInvites.inviteCode, hashToken(inviteCode)));
     if (invites.length === 0 || invites[0].status !== 'pending') {
       return null;
     }
@@ -721,7 +729,7 @@ export const dataStore = {
     });
 
     // Atomically consume token
-    await tokenStore.consumeToken(inviteCode).catch(() => {});
+    await tokenStore.consumeToken(inviteCode, 'inviteToken').catch(() => {});
 
     return {
       success: true,
@@ -787,7 +795,7 @@ export const dataStore = {
     });
 
     // Atomically consume token
-    await tokenStore.consumeToken(inviteCode).catch(() => {});
+    await tokenStore.consumeToken(inviteCode, 'inviteToken').catch(() => {});
 
     return {
       success: true,
@@ -815,7 +823,7 @@ export const dataStore = {
     const invites = await pgDb
       .select()
       .from(teamInvites)
-      .where(eq(teamInvites.inviteCode, inviteCode));
+      .where(eq(teamInvites.inviteCode, hashToken(inviteCode)));
 
     if (invites.length === 0) {
       throw new Error('Invalid invite code');
@@ -866,7 +874,7 @@ export const dataStore = {
       }
     });
 
-    await tokenStore.consumeToken(inviteCode).catch(() => {});
+    await tokenStore.consumeToken(inviteCode, 'inviteToken').catch(() => {});
 
     return {
       id: newMember.id,
@@ -945,6 +953,21 @@ export const dataStore = {
     createdBy: string;
     createdById?: string;
   }): Promise<FolderItem> {
+    if (data.id) {
+      const existingFolder = await pgDb
+        .select({ id: folders.id, teamId: folders.teamId, workspaceId: folders.workspaceId })
+        .from(folders)
+        .where(eq(folders.id, data.id));
+      if (existingFolder.length > 0) {
+        if (
+          existingFolder[0].teamId !== data.teamId ||
+          existingFolder[0].workspaceId !== data.workspaceId
+        ) {
+          throw new Error('Access Denied: Folder ID belongs to a different team or workspace.');
+        }
+      }
+    }
+
     const id = data.id || crypto.randomUUID();
     const now = new Date();
     const trimmedName = data.name.trim();
@@ -967,6 +990,7 @@ export const dataStore = {
         description: data.description?.trim() || null,
         updatedAt: now,
       },
+      where: and(eq(folders.teamId, data.teamId), eq(folders.workspaceId, data.workspaceId)),
     });
 
     return {
@@ -1125,7 +1149,7 @@ export const dataStore = {
       folderId: r.folderId || null,
       folderName: r.folderId ? folderNameMap.get(r.folderId) : undefined,
       key: r.key,
-      value: r.value,
+      value: r.isSecret ? decryptEnvValue(r.value) : r.value,
       isSecret: Boolean(r.isSecret),
       comment: r.comment || undefined,
       createdBy: r.createdBy,
@@ -1153,6 +1177,9 @@ export const dataStore = {
     const now = new Date();
     const normalizedKey = data.key.toUpperCase().trim();
     const folderId = data.folderId || null;
+    const isSecret = data.isSecret !== undefined ? Boolean(data.isSecret) : true;
+    // Sensitive variables must never be stored dry/plain-text in the database
+    const valueToStore = isSecret ? encryptEnvValue(data.value) : data.value;
 
     let targetId = data.id;
     if (!targetId) {
@@ -1203,8 +1230,8 @@ export const dataStore = {
         environment: data.environment,
         folderId: folderId,
         key: normalizedKey,
-        value: data.value,
-        isSecret: data.isSecret !== undefined ? Boolean(data.isSecret) : true,
+        value: valueToStore,
+        isSecret: isSecret,
         comment: data.comment || null,
         createdBy: data.createdBy,
         createdById: effectiveCreatedById,
@@ -1219,8 +1246,8 @@ export const dataStore = {
           environment: data.environment,
           folderId: folderId,
           key: normalizedKey,
-          value: data.value,
-          isSecret: data.isSecret !== undefined ? Boolean(data.isSecret) : true,
+          value: valueToStore,
+          isSecret: isSecret,
           comment: data.comment || null,
           updatedAt: now,
         },
@@ -1234,13 +1261,37 @@ export const dataStore = {
       folderId,
       key: normalizedKey,
       value: data.value,
-      isSecret: data.isSecret !== undefined ? Boolean(data.isSecret) : true,
+      isSecret,
       comment: data.comment,
       createdBy: data.createdBy,
       createdById: effectiveCreatedById ?? undefined,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
     };
+  },
+
+  async ensureSensitiveEnvsEncrypted(): Promise<number> {
+    try {
+      const sensitiveRows = await pgDb
+        .select({ id: envs.id, value: envs.value })
+        .from(envs)
+        .where(and(eq(envs.isSecret, true), sql`value NOT LIKE 'enc:v1:%'`));
+
+      let count = 0;
+      for (const row of sensitiveRows) {
+        if (row.value && !isEncryptedEnvValue(row.value)) {
+          await pgDb
+            .update(envs)
+            .set({ value: encryptEnvValue(row.value) })
+            .where(eq(envs.id, row.id));
+          count++;
+        }
+      }
+      return count;
+    } catch (err) {
+      console.warn('Notice on auto-encrypt sensitive envs in PostgreSQL:', err);
+      return 0;
+    }
   },
 
   async deleteEnv(id: string, teamId: string, userId?: string, userRole?: string): Promise<boolean> {
@@ -1272,7 +1323,9 @@ export const dataStore = {
     environment: 'development' | 'staging' | 'production',
     folderId: string | null | undefined,
     rawDotEnv: string,
-    createdBy: string
+    createdBy: string,
+    userId?: string,
+    userRole?: string
   ): Promise<{ importedCount: number }> {
     const lines = rawDotEnv.split('\n');
     let importedCount = 0;
@@ -1289,7 +1342,13 @@ export const dataStore = {
         (value.startsWith('"') && value.endsWith('"')) ||
         (value.startsWith("'") && value.endsWith("'"))
       ) {
-        value = value.slice(1, -1).replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+        value = value.slice(1, -1).replace(/\\([\\n"'])/g, (_, esc) => {
+          if (esc === 'n') return '\n';
+          if (esc === '\\') return '\\';
+          if (esc === '"') return '"';
+          if (esc === "'") return "'";
+          return esc;
+        });
       }
 
       await this.upsertEnv({
@@ -1302,10 +1361,145 @@ export const dataStore = {
         isSecret: true,
         comment: 'Imported via Monorepo Cloud Sync',
         createdBy,
+        userId,
+        userRole,
       });
       importedCount++;
     }
 
     return { importedCount };
+  },
+
+  async exportEnvsAsZip(params: {
+    workspaceId: string;
+    teamId: string;
+    environment: 'development' | 'staging' | 'production';
+    folderIds?: string[] | null;
+  }): Promise<{
+    fileName: string;
+    buffer: Buffer;
+    base64: string;
+    folderCount: number;
+    envCount: number;
+  }> {
+    const { workspaceId, teamId, environment, folderIds } = params;
+    const team = await this.getTeamById(teamId);
+    const teamNameSlug = (team?.name || 'team')
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]/g, '_')
+      .replace(/_+/g, '_');
+
+    // 1. Fetch all folders for this scope
+    const allFolders = await this.getFolders(workspaceId, teamId, environment);
+    const folderMap = new Map<string, FolderItem>();
+    allFolders.forEach(f => folderMap.set(f.id, f));
+
+    // Determine target folders
+    let targetFolders: FolderItem[] = [];
+    let includeRoot = false;
+
+    if (!folderIds || folderIds.length === 0) {
+      // Export all folders + root
+      targetFolders = allFolders;
+      includeRoot = true;
+    } else {
+      // Filter by specified folderIds
+      includeRoot = folderIds.includes('root') || folderIds.includes('unfiled') || folderIds.includes(null as any);
+      targetFolders = allFolders.filter(f => folderIds.includes(f.id));
+    }
+
+    // 2. Fetch all envs for this scope
+    const allEnvs = await this.getEnvs(workspaceId, teamId, environment);
+
+    // Group envs by folderId (null means root)
+    const envsByFolder = new Map<string | null, EnvItem[]>();
+    allEnvs.forEach(e => {
+      const fId = e.folderId || null;
+      if (!envsByFolder.has(fId)) {
+        envsByFolder.set(fId, []);
+      }
+      envsByFolder.get(fId)!.push(e);
+    });
+
+    const zip = new JSZip();
+    let totalExportedEnvs = 0;
+    let totalExportedFolders = 0;
+
+    const formatDotEnv = (items: EnvItem[], folderTitle: string): string => {
+      const header = [
+        `# ==========================================`,
+        `# Tubo Vault Environment Export`,
+        `# Team: ${team?.name || teamId}`,
+        `# Folder: ${folderTitle}`,
+        `# Environment: ${environment}`,
+        `# Exported At: ${new Date().toISOString()}`,
+        `# Total Variables: ${items.length}`,
+        `# ==========================================`,
+        '',
+      ].join('\n');
+
+      const body = items
+        .map(e => {
+          const commentPart = e.comment ? `# ${e.comment}\n` : '';
+          const escapedValue = (e.value ?? '')
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, '\\n');
+          return `${commentPart}${e.key}="${escapedValue}"`;
+        })
+        .join('\n\n');
+
+      return header + body + '\n';
+    };
+
+    // Add target folders to zip
+    for (const folder of targetFolders) {
+      const folderEnvs = envsByFolder.get(folder.id) || [];
+      const sanitizedName = folder.name
+        .trim()
+        .replace(/[/\\?%*:|"<>]/g, '_')
+        .replace(/\s+/g, ' ');
+      const dotEnvContent = formatDotEnv(folderEnvs, folder.name);
+      zip.file(`${sanitizedName}/.env`, dotEnvContent);
+      totalExportedFolders++;
+      totalExportedEnvs += folderEnvs.length;
+    }
+
+    // Add root / unassigned envs if included
+    if (includeRoot) {
+      const rootEnvs = envsByFolder.get(null) || [];
+      if (rootEnvs.length > 0 || (!folderIds || folderIds.length === 0)) {
+        const dotEnvContent = formatDotEnv(rootEnvs, 'Root / Unfiled');
+        zip.file(`root/.env`, dotEnvContent);
+        totalExportedFolders++;
+        totalExportedEnvs += rootEnvs.length;
+      }
+    }
+
+    // Name the zip file based on single vs multiple
+    let fileName = `tubo_${teamNameSlug}_${environment}_envs.zip`;
+    if (folderIds && folderIds.length === 1) {
+      const singleId = folderIds[0];
+      const singleFolder = singleId ? folderMap.get(singleId) : null;
+      const singleName = singleFolder
+        ? singleFolder.name.toLowerCase().replace(/[^a-z0-9_-]/g, '_')
+        : 'root';
+      fileName = `tubo_${teamNameSlug}_${singleName}_${environment}.zip`;
+    }
+
+    const buffer = await zip.generateAsync({
+      type: 'nodebuffer',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 },
+    });
+    const base64 = buffer.toString('base64');
+
+    return {
+      fileName,
+      buffer,
+      base64,
+      folderCount: totalExportedFolders,
+      envCount: totalExportedEnvs,
+    };
   },
 };

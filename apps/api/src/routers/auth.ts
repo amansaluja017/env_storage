@@ -170,7 +170,7 @@ export const authRouter = router({
       }
 
       // 2. Atomically consume the token first (conditional update ensuring consumed_at is null)
-      const consumed = await tokenStore.consumeToken(input.refreshToken);
+      const consumed = await tokenStore.consumeToken(input.refreshToken, 'refreshToken');
       if (!consumed) {
         // Token was already consumed (reuse attack) - revoke user's remaining refresh tokens
         if (tokenRecord.userId) {
@@ -243,7 +243,7 @@ export const authRouter = router({
       }
 
       if (input?.refreshToken) {
-        const consumed = await tokenStore.consumeToken(input.refreshToken);
+        const consumed = await tokenStore.consumeToken(input.refreshToken, 'refreshToken');
         if (!consumed && !ctx.user?.id) {
           throw new TRPCError({
             code: 'UNAUTHORIZED',
@@ -311,7 +311,9 @@ export const authRouter = router({
       return {
         success: true,
         message: ACK_MESSAGE,
-        previewUrl: mailResult.previewUrl,
+        ...(process.env.NODE_ENV !== 'production' && mailResult.previewUrl
+          ? { previewUrl: mailResult.previewUrl }
+          : {}),
       };
     }),
 
@@ -337,7 +339,7 @@ export const authRouter = router({
       }
 
       // 2. Consume the reset token atomically
-      const consumed = await tokenStore.consumeToken(input.token);
+      const consumed = await tokenStore.consumeToken(input.token, 'passwordResetToken');
       if (!consumed) {
         throw new TRPCError({
           code: 'BAD_REQUEST',
