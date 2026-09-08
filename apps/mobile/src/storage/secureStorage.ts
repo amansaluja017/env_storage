@@ -100,28 +100,52 @@ export async function saveAuthSession(session: AuthSession): Promise<void> {
  * Retrieve saved authentication session from native secure storage
  */
 export async function getAuthSession(): Promise<AuthSession | null> {
-  let accessToken: string | null = null;
-  let refreshToken: string | null = null;
-  let userJson: string | null = null;
+  let sessionTuple: [string, string, string] | null = null;
 
   if (shouldUseSecureStore()) {
     try {
-      accessToken = (await SecureStore.getItemAsync(ACCESS_TOKEN_KEY)) || (await SecureStore.getItemAsync(LEGACY_ACCESS_TOKEN_KEY));
-      refreshToken = (await SecureStore.getItemAsync(REFRESH_TOKEN_KEY)) || (await SecureStore.getItemAsync(LEGACY_REFRESH_TOKEN_KEY));
-      userJson = (await SecureStore.getItemAsync(USER_SESSION_KEY)) || (await SecureStore.getItemAsync(LEGACY_USER_SESSION_KEY));
+      const curAccess = await SecureStore.getItemAsync(ACCESS_TOKEN_KEY);
+      const curRefresh = await SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
+      const curUser = await SecureStore.getItemAsync(USER_SESSION_KEY);
+
+      if (curAccess && curRefresh && curUser) {
+        sessionTuple = [curAccess, curRefresh, curUser];
+      } else {
+        const legAccess = await SecureStore.getItemAsync(LEGACY_ACCESS_TOKEN_KEY);
+        const legRefresh = await SecureStore.getItemAsync(LEGACY_REFRESH_TOKEN_KEY);
+        const legUser = await SecureStore.getItemAsync(LEGACY_USER_SESSION_KEY);
+        if (legAccess && legRefresh && legUser) {
+          sessionTuple = [legAccess, legRefresh, legUser];
+        }
+      }
     } catch (err) {
       console.warn('SecureStore read failed:', err);
     }
   }
 
   // Fall back to web/memory store if missing from SecureStore
-  accessToken = accessToken || getWebOrMemoryItem(ACCESS_TOKEN_KEY) || getWebOrMemoryItem(LEGACY_ACCESS_TOKEN_KEY);
-  refreshToken = refreshToken || getWebOrMemoryItem(REFRESH_TOKEN_KEY) || getWebOrMemoryItem(LEGACY_REFRESH_TOKEN_KEY);
-  userJson = userJson || getWebOrMemoryItem(USER_SESSION_KEY) || getWebOrMemoryItem(LEGACY_USER_SESSION_KEY);
+  if (!sessionTuple) {
+    const curAccess = getWebOrMemoryItem(ACCESS_TOKEN_KEY);
+    const curRefresh = getWebOrMemoryItem(REFRESH_TOKEN_KEY);
+    const curUser = getWebOrMemoryItem(USER_SESSION_KEY);
 
-  if (!accessToken || !refreshToken || !userJson) {
+    if (curAccess && curRefresh && curUser) {
+      sessionTuple = [curAccess, curRefresh, curUser];
+    } else {
+      const legAccess = getWebOrMemoryItem(LEGACY_ACCESS_TOKEN_KEY);
+      const legRefresh = getWebOrMemoryItem(LEGACY_REFRESH_TOKEN_KEY);
+      const legUser = getWebOrMemoryItem(LEGACY_USER_SESSION_KEY);
+      if (legAccess && legRefresh && legUser) {
+        sessionTuple = [legAccess, legRefresh, legUser];
+      }
+    }
+  }
+
+  if (!sessionTuple) {
     return null;
   }
+
+  const [accessToken, refreshToken, userJson] = sessionTuple;
 
   try {
     const user = JSON.parse(userJson) as UserInfo;
@@ -204,16 +228,26 @@ export async function updateAccessToken(newAccessToken: string, newRefreshToken?
  * Clear stored authentication session on sign out from secure storage
  */
 export async function clearAuthSession(): Promise<void> {
+  let secureStoreError: any = null;
+
   if (shouldUseSecureStore()) {
-    try {
-      await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY);
-      await SecureStore.deleteItemAsync(LEGACY_ACCESS_TOKEN_KEY).catch(() => {});
-      await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
-      await SecureStore.deleteItemAsync(LEGACY_REFRESH_TOKEN_KEY).catch(() => {});
-      await SecureStore.deleteItemAsync(USER_SESSION_KEY);
-      await SecureStore.deleteItemAsync(LEGACY_USER_SESSION_KEY).catch(() => {});
-    } catch (err) {
-      console.warn('SecureStore clear failed:', err);
+    const keys = [
+      ACCESS_TOKEN_KEY,
+      LEGACY_ACCESS_TOKEN_KEY,
+      REFRESH_TOKEN_KEY,
+      LEGACY_REFRESH_TOKEN_KEY,
+      USER_SESSION_KEY,
+      LEGACY_USER_SESSION_KEY,
+    ];
+
+    const results = await Promise.allSettled(
+      keys.map((k) => SecureStore.deleteItemAsync(k))
+    );
+
+    const rejections = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (rejections.length > 0) {
+      console.warn('SecureStore clear partial failure:', rejections[0].reason);
+      secureStoreError = rejections[0].reason;
     }
   }
 
@@ -223,4 +257,8 @@ export async function clearAuthSession(): Promise<void> {
   removeWebOrMemoryItem(LEGACY_REFRESH_TOKEN_KEY);
   removeWebOrMemoryItem(USER_SESSION_KEY);
   removeWebOrMemoryItem(LEGACY_USER_SESSION_KEY);
+
+  if (secureStoreError) {
+    throw secureStoreError;
+  }
 }

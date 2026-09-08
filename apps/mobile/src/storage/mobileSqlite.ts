@@ -404,12 +404,12 @@ export async function updateSyncItemStatus(
   const { drizzle } = await ensureDb();
   const now = new Date().toISOString();
 
-  if (status === 'failed') {
+  if (status === 'failed' || (status === 'pending' && lastError)) {
     await drizzle
       .update(syncQueue)
       .set({
         status,
-        lastError: lastError || 'Unknown sync error',
+        lastError: lastError || (status === 'failed' ? 'Unknown sync error' : null),
         retryCount: sql`retry_count + 1`,
         updatedAt: now,
       })
@@ -917,6 +917,40 @@ export async function bulkImportMobileEnvs(
 }
 
 /**
+ * Reconcile bulk-imported envs after successful API sync.
+ * Removes any pending_create rows whose keys match the newly imported remote envs
+ * in this scope, so they are cleanly replaced by the authoritative remote rows.
+ */
+export async function reconcileBulkImportedEnvs(
+  workspaceId: string,
+  teamId: string,
+  environment: 'development' | 'staging' | 'production',
+  importedKeys: string[],
+  folderId?: string | null
+): Promise<void> {
+  if (!importedKeys || importedKeys.length === 0) return;
+  const { drizzle } = await ensureDb();
+
+  const conditions = [
+    eq(envs.workspaceId, workspaceId),
+    eq(envs.teamId, teamId),
+    eq(envs.environment, environment),
+    inArray(envs.syncStatus, ['pending_create', 'pending_update']),
+    inArray(envs.key, importedKeys),
+  ];
+
+  if (folderId !== undefined) {
+    if (folderId === null) {
+      conditions.push(isNull(envs.folderId));
+    } else {
+      conditions.push(eq(envs.folderId, folderId));
+    }
+  }
+
+  await drizzle.delete(envs).where(and(...conditions));
+}
+
+/**
  * Export all environment variables for a team as a .env formatted string from persistent SQLite
  */
 export async function exportMobileEnvsDotEnv(
@@ -1324,17 +1358,21 @@ export async function syncFoldersFromRemote(
   }
 
   // 2. Fetch any items pending deletion in local queue to avoid ghost revive
-  const pendingDeletes = await drizzle
-    .select({ entityId: syncQueue.entityId })
-    .from(syncQueue)
-    .where(
-      and(
-        eq(syncQueue.entityType, 'folder'),
-        eq(syncQueue.action, 'delete'),
-        inArray(syncQueue.status, ['pending', 'syncing'])
-      )
-    );
-  const pendingDeleteIds = new Set(pendingDeletes.map((p) => p.entityId));
+  let pendingDeleteIds = new Set<string>();
+  if (remoteFolderIds.length > 0) {
+    const pendingDeletes = await drizzle
+      .select({ entityId: syncQueue.entityId })
+      .from(syncQueue)
+      .where(
+        and(
+          eq(syncQueue.entityType, 'folder'),
+          eq(syncQueue.action, 'delete'),
+          inArray(syncQueue.status, ['pending', 'syncing']),
+          inArray(syncQueue.entityId, remoteFolderIds)
+        )
+      );
+    pendingDeleteIds = new Set(pendingDeletes.map((p) => p.entityId));
+  }
 
   // 3. Upsert returned folders (marking them as synced)
   for (const rf of remoteFolders) {
@@ -1420,17 +1458,21 @@ export async function syncEnvsFromRemote(
   }
 
   // 2. Fetch any envs pending deletion in local queue to avoid ghost revive
-  const pendingDeletes = await drizzle
-    .select({ entityId: syncQueue.entityId })
-    .from(syncQueue)
-    .where(
-      and(
-        eq(syncQueue.entityType, 'env'),
-        eq(syncQueue.action, 'delete'),
-        inArray(syncQueue.status, ['pending', 'syncing'])
-      )
-    );
-  const pendingDeleteIds = new Set(pendingDeletes.map((p) => p.entityId));
+  let pendingDeleteIds = new Set<string>();
+  if (remoteEnvIds.length > 0) {
+    const pendingDeletes = await drizzle
+      .select({ entityId: syncQueue.entityId })
+      .from(syncQueue)
+      .where(
+        and(
+          eq(syncQueue.entityType, 'env'),
+          eq(syncQueue.action, 'delete'),
+          inArray(syncQueue.status, ['pending', 'syncing']),
+          inArray(syncQueue.entityId, remoteEnvIds)
+        )
+      );
+    pendingDeleteIds = new Set(pendingDeletes.map((p) => p.entityId));
+  }
 
   // 3. Upsert returned envs (marking them as synced)
   for (const re of remoteEnvs) {

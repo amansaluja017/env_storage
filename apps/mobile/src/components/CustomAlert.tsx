@@ -235,7 +235,16 @@ export function AlertProvider({ children }: { children: React.ReactNode }) {
     <AlertContext.Provider value={{ showAlert, hideAlert }}>
       {children}
 
-      <Modal visible={visible} transparent animationType="none" onRequestClose={hideAlert}>
+      <Modal
+        visible={visible}
+        transparent
+        animationType="none"
+        onRequestClose={() => {
+          if (alertConfig.dismissable) {
+            hideAlert();
+          }
+        }}
+      >
         <TouchableWithoutFeedback
           onPress={() => {
             if (alertConfig.dismissable) {
@@ -244,7 +253,7 @@ export function AlertProvider({ children }: { children: React.ReactNode }) {
           }}
         >
           <Animated.View style={[styles.overlay, { opacity: backdropAnim }]}>
-            <TouchableWithoutFeedback onPress={(e) => e.stopPropagation()}>
+            <TouchableWithoutFeedback onPress={() => {}}>
               <Animated.View
                 style={[
                   styles.dialogCard,

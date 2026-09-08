@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   StyleSheet,
   View,
@@ -80,6 +80,7 @@ function MainApp() {
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [isRestoringSession, setIsRestoringSession] = useState(true);
+  const processedInitialUrlRef = useRef(false);
 
   // Active Selections
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -184,7 +185,14 @@ function MainApp() {
   };
 
   const handleReplayWelcomeTour = () => {
-    start(TOUR_IDS.WELCOME);
+    if (activeTab !== 'envs') {
+      setActiveTab('envs');
+      setTimeout(() => {
+        start(TOUR_IDS.WELCOME);
+      }, 50);
+    } else {
+      start(TOUR_IDS.WELCOME);
+    }
   };
 
   const executeLogout = async () => {
@@ -309,7 +317,10 @@ function MainApp() {
       }
     };
 
-    Linking.getInitialURL().then(handleIncomingUrl).catch(() => {});
+    if (!processedInitialUrlRef.current) {
+      processedInitialUrlRef.current = true;
+      Linking.getInitialURL().then(handleIncomingUrl).catch(() => {});
+    }
 
     const stateSub = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {

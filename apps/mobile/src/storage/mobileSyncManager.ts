@@ -8,6 +8,7 @@ import {
   markEntitySynced,
   getPendingSyncCount,
   syncEnvsFromRemote,
+  reconcileBulkImportedEnvs,
   SyncQueueItem,
 } from './mobileSqlite';
 
@@ -120,6 +121,7 @@ class MobileSyncManager {
           break;
         }
 
+        let processedInBatch = 0;
         for (const item of batch) {
           const success = await this.processSyncItem(item, baseUrl);
           if (!success) {
@@ -130,8 +132,15 @@ class MobileSyncManager {
               break;
             }
           } else {
+            processedInBatch++;
             consecutiveNetworkErrors = 0;
           }
+        }
+
+        // If no items made progress in this batch, avoid infinite spinning
+        if (processedInBatch === 0) {
+          hasMore = false;
+          break;
         }
 
         this.pendingCount = await getPendingSyncCount();
@@ -251,6 +260,14 @@ class MobileSyncManager {
 
           const imported = res.data?.result?.data;
           if (Array.isArray(imported)) {
+            const importedKeys = imported.map((i: any) => i.key).filter(Boolean);
+            await reconcileBulkImportedEnvs(
+              payload.workspaceId,
+              payload.teamId,
+              payload.environment,
+              importedKeys,
+              payload.folderId
+            );
             await syncEnvsFromRemote(
               payload.workspaceId,
               payload.teamId,
