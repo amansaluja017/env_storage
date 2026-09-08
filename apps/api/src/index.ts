@@ -393,18 +393,20 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Ensure sensitive envs encrypted & ensure migrations on launch
-dataStore.ensureSensitiveEnvsEncrypted()
-  .then(async () => {
-    try {
-      await pgPool.query('ALTER TABLE team_invites ALTER COLUMN invite_code TYPE text;');
-    } catch {}
-  })
-  .catch(err => {
-    console.error('Error during startup initialization:', err);
-  });
+// Ensure sensitive envs encrypted & ensure migrations on launch before listening
+async function startServer() {
+  try {
+    await dataStore.ensureSensitiveEnvsEncrypted();
+    await pgPool.query('ALTER TABLE team_invites ALTER COLUMN invite_code TYPE text;');
 
-app.listen(PORT, () => {
-  console.log(`🚀 Env Vault Express + tRPC Server running on http://localhost:${PORT}`);
-  console.log(`⚡ tRPC Endpoint: http://localhost:${PORT}/trpc (Auth, Workspace, Team, Folder, Env)`);
-});
+    app.listen(PORT, () => {
+      console.log(`🚀 Env Vault Express + tRPC Server running on http://localhost:${PORT}`);
+      console.log(`⚡ tRPC Endpoint: http://localhost:${PORT}/trpc (Auth, Workspace, Team, Folder, Env)`);
+    });
+  } catch (err) {
+    console.error('Fatal error during startup initialization:', err);
+    process.exit(1);
+  }
+}
+
+void startServer();

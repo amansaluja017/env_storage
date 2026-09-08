@@ -281,10 +281,10 @@ export const authRouter = router({
       // Find user strictly in Postgres DB
       const res = await pgDb.select().from(users).where(eq(users.email, email));
       if (res.length === 0) {
-        throw new TRPCError({
-          code: 'NOT_FOUND',
-          message: 'This email is not registered with an account. Please check the spelling or sign up.',
-        });
+        return {
+          success: true,
+          message: ACK_MESSAGE,
+        };
       }
 
       const foundUser = res[0];

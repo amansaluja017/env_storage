@@ -14,7 +14,7 @@ export const users = pgTable('users', {
 export const workspaces = pgTable('workspaces', {
   id: uuid('id').defaultRandom().primaryKey(),
   name: text('name').notNull(),
-  slug: varchar('slug', { length: 100 }).notNull().unique(),
+  slug: varchar('slug', { length: 100 }).notNull(),
   ownerId: uuid('owner_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });

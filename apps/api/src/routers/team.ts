@@ -3,7 +3,7 @@ import { router, protectedProcedure } from '../trpc.js';
 import { dataStore } from '../storage/store.js';
 import { TRPCError } from '@trpc/server';
 import { sendTeamInvitationEmail, getPublicBaseUrl } from '../services/emailService.js';
-import { pgDb, teamInvites, users, eq, and } from '@tubo/db';
+import { pgDb, teamInvites, users, eq, and, inArray } from '@tubo/db';
 
 export const teamRouter = router({
   list: protectedProcedure
@@ -122,23 +122,27 @@ export const teamRouter = router({
         );
 
       if (pendingInvites.length > 0) {
-        const activeInvite = pendingInvites[0];
         const now = new Date();
         const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
 
-        // If the pending invite was created within the last 1 hour, it is still active and valid
-        if (activeInvite.createdAt > oneHourAgo) {
+        const hasRecentActiveInvite = pendingInvites.some(
+          (invite) => invite.createdAt > oneHourAgo
+        );
+
+        // If any pending invite was created within the last 1 hour, it is still active and valid
+        if (hasRecentActiveInvite) {
           throw new TRPCError({
             code: 'CONFLICT',
             message: `An active invitation has already been sent to ${targetEmail} for this team. You can copy the invite link from the invites list below.`,
           });
         }
 
-        // If the pending invite is older than 1 hour, expire it cleanly so a fresh invite can be created
+        // If pending invites are older than 1 hour, expire all of them cleanly so a fresh invite can be created
+        const olderInviteIds = pendingInvites.map((inv) => inv.id);
         await pgDb
           .update(teamInvites)
           .set({ status: 'expired' })
-          .where(eq(teamInvites.id, activeInvite.id));
+          .where(inArray(teamInvites.id, olderInviteIds));
       }
 
       const invite = await dataStore.createInvite({

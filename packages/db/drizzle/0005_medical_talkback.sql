@@ -4,8 +4,4 @@ EXCEPTION
   WHEN duplicate_object THEN null;
 END $$;
 --> statement-breakpoint
-DO $$ BEGIN
-  ALTER TABLE "tokens" ALTER COLUMN "type" SET DATA TYPE token_type USING "type"::token_type;
-EXCEPTION
-  WHEN others THEN null;
-END $$;
+ALTER TABLE "tokens" ALTER COLUMN "type" SET DATA TYPE token_type USING "type"::token_type;

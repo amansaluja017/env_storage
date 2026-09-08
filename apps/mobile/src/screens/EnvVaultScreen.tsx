@@ -508,17 +508,7 @@ export function EnvVaultScreen({
           style: 'destructive',
           onPress: async () => {
             try {
-              // 1. Delete in SQLite first (instant local response)
-              await deleteMobileFolder(folder.id, false);
-              if (selectedFolderId === folder.id) {
-                setSelectedFolderId(null);
-              }
-              await fetchFolders();
-              if (selectedFolderId !== null && selectedFolderId !== folder.id) {
-                await fetchEnvs();
-              }
-
-              // 2. Enqueue deletion & trigger background sync
+              // 1. Enqueue deletion & trigger background sync first
               await enqueueSyncItem({
                 entityType: 'folder',
                 entityId: folder.id,
@@ -530,6 +520,16 @@ export function EnvVaultScreen({
                 },
               });
               mobileSyncManager.triggerSync(apiBaseUrl);
+
+              // 2. Delete in SQLite (instant local response)
+              await deleteMobileFolder(folder.id, false);
+              if (selectedFolderId === folder.id) {
+                setSelectedFolderId(null);
+              }
+              await fetchFolders();
+              if (selectedFolderId !== null && selectedFolderId !== folder.id) {
+                await fetchEnvs();
+              }
             } catch (e: any) {
               showCustomAlert({
                 title: 'Delete Failed',
@@ -634,15 +634,7 @@ export function EnvVaultScreen({
           style: 'destructive',
           onPress: async () => {
             try {
-              // 1. Delete from SQLite first (instant local response)
-              await deleteMobileEnv(id);
-              if (selectedFolderId !== null) {
-                await fetchEnvs();
-              } else {
-                await fetchFolders();
-              }
-
-              // 2. Enqueue deletion & trigger background sync
+              // 1. Enqueue deletion & trigger background sync first
               await enqueueSyncItem({
                 entityType: 'env',
                 entityId: id,
@@ -653,6 +645,14 @@ export function EnvVaultScreen({
                 },
               });
               mobileSyncManager.triggerSync(apiBaseUrl);
+
+              // 2. Delete from SQLite (instant local response)
+              await deleteMobileEnv(id);
+              if (selectedFolderId !== null) {
+                await fetchEnvs();
+              } else {
+                await fetchFolders();
+              }
             } catch (e: any) {
               showCustomAlert({
                 title: 'Delete Error',
