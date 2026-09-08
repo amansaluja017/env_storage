@@ -52,6 +52,15 @@ export function CreateTeamModal({
   });
 
   const onSubmit = async (formData: CreateTeamFormData) => {
+    if (!workspaceId || workspaceId.trim() === '') {
+      showCustomAlert({
+        title: 'Workspace Required',
+        message: 'You must create or select a workspace before creating a team. Workspaces organize your teams.',
+        type: 'warning',
+      });
+      return;
+    }
+
     setSubmitting(true);
     try {
       const response = await apiClient.post(`${apiBaseUrl}/trpc/team.create`, {

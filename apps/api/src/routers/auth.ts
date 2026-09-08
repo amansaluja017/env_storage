@@ -6,7 +6,7 @@ import { router, publicProcedure, protectedProcedure } from '../trpc.js';
 import { JWT_SECRET, JWT_REFRESH_SECRET } from '../context.js';
 import { pgDb, users, teamInvites, teams, workspaces, eq } from '@tubo/db';
 import { TRPCError } from '@trpc/server';
-import { tokenStore } from '../storage/tokenStore.js';
+import { tokenStore, decryptToken } from '../storage/tokenStore.js';
 import {
   sendEmailVerificationEmail,
   sendPasswordResetEmail,
@@ -281,11 +281,10 @@ export const authRouter = router({
       // Find user strictly in Postgres DB
       const res = await pgDb.select().from(users).where(eq(users.email, email));
       if (res.length === 0) {
-        // Return neutral message without leaking user existence
-        return {
-          success: true,
-          message: ACK_MESSAGE,
-        };
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'This email is not registered with an account. Please check the spelling or sign up.',
+        });
       }
 
       const foundUser = res[0];
@@ -402,7 +401,7 @@ export const authRouter = router({
     }
 
     const currentUser = res[0];
-    const userCode = `TUBO-${currentUser.name.replace(/[^a-zA-Z0-9]/g, '').slice(0, 4).toUpperCase()}-${currentUser.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
+    const userCode = `ENV-${currentUser.name.replace(/[^a-zA-Z0-9]/g, '').slice(0, 4).toUpperCase()}-${currentUser.id.replace(/-/g, '').slice(0, 6).toUpperCase()}`;
 
     // Look for any team invites sent to this user's email
     const invites = await pgDb
@@ -421,7 +420,12 @@ export const authRouter = router({
       .leftJoin(teams, eq(teamInvites.teamId, teams.id))
       .where(eq(teamInvites.email, currentUser.email.toLowerCase().trim()));
 
-    const activeInvite = invites.find(i => i.status === 'pending');
+    const decryptedInvites = invites.map(i => ({
+      ...i,
+      inviteCode: decryptToken(i.inviteCode),
+    }));
+
+    const activeInvite = decryptedInvites.find(i => i.status === 'pending');
 
     return {
       user: {
@@ -432,7 +436,7 @@ export const authRouter = router({
       },
       userCode,
       activeInviteCode: activeInvite ? activeInvite.inviteCode : null,
-      invites,
+      invites: decryptedInvites,
     };
   }),
 

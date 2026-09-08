@@ -14,7 +14,6 @@ import {
 } from 'react-native';
 import { useForm, Controller } from 'react-hook-form';
 import { Ionicons } from '@expo/vector-icons';
-import * as Clipboard from 'expo-clipboard';
 import { COLORS } from '../theme';
 import { apiClient } from '../utils/apiClient';
 import { showCustomAlert } from './CustomAlert';
@@ -46,17 +45,6 @@ interface ChangePasswordFormData {
   confirmPassword: string;
 }
 
-interface TeamInviteInfo {
-  id: string;
-  inviteCode: string;
-  email: string;
-  role: string;
-  status: string;
-  teamId: string;
-  teamName?: string;
-  createdAt: string;
-}
-
 export function AccountModal({
   visible,
   onClose,
@@ -66,11 +54,6 @@ export function AccountModal({
   onReplayTour,
 }: AccountModalProps) {
   const [activeTab, setActiveTab] = useState<'account' | 'email' | 'password'>('account');
-
-  // Account state
-  const [loadingAccountInfo, setLoadingAccountInfo] = useState(false);
-  const [pendingInvites, setPendingInvites] = useState<TeamInviteInfo[]>([]);
-  const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
   // Email form
   const [emailSubmitting, setEmailSubmitting] = useState(false);
@@ -107,46 +90,6 @@ export function AccountModal({
   });
 
   // Fetch account info whenever modal is opened
-  useEffect(() => {
-    if (visible) {
-      fetchAccountInfo();
-    }
-  }, [visible, user.email]);
-
-  const fetchAccountInfo = async () => {
-    setLoadingAccountInfo(true);
-    try {
-      const response = await apiClient.get(`${apiBaseUrl}/trpc/auth.getAccountInfo`);
-      const data = response.data;
-      if (data?.result?.data) {
-        const info = data.result.data;
-        if (Array.isArray(info.invites)) {
-          setPendingInvites(info.invites);
-        }
-      }
-    } catch {
-      // Ignore
-    } finally {
-      setLoadingAccountInfo(false);
-    }
-  };
-
-  const handleCopyCode = async (code: string) => {
-    try {
-      await Clipboard.setStringAsync(code);
-      setCopiedCode(code);
-      setTimeout(() => {
-        setCopiedCode(null);
-      }, 2000);
-    } catch {
-      showCustomAlert({
-        title: 'Invite Code',
-        message: code,
-        type: 'info',
-      });
-    }
-  };
-
   const onChangeEmail = async (formData: ChangeEmailFormData) => {
     setEmailSubmitting(true);
     try {
@@ -346,66 +289,6 @@ export function AccountModal({
                     </Text>
                   </View>
                 </View>
-
-                {/* On-demand Product Tour Button */}
-                {onReplayTour && (
-                  <TouchableOpacity
-                    style={styles.tourLauncherCard}
-                    onPress={() => {
-                      onClose();
-                      setTimeout(() => {
-                        onReplayTour();
-                      }, 350);
-                    }}
-                    activeOpacity={0.8}
-                  >
-                    <View style={styles.tourLauncherLeft}>
-                      <View style={styles.tourLauncherIconBox}>
-                        <Ionicons name="compass" size={18} color={COLORS.primary} />
-                      </View>
-                      <View>
-                        <Text style={styles.tourLauncherTitle}>Start Guided Tour</Text>
-                        <Text style={styles.tourLauncherSub}>Learn how to use Env Vault & Teams</Text>
-                      </View>
-                    </View>
-                    <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} />
-                  </TouchableOpacity>
-                )}
-
-                {/* Team Invites List (if any) */}
-                {pendingInvites.length > 0 && (
-                  <View style={styles.invitesSection}>
-                    <Text style={styles.invitesSectionTitle}>PENDING TEAM INVITE CODES</Text>
-                    {pendingInvites.map((inv) => (
-                      <View key={inv.id} style={styles.inviteItemCard}>
-                        <View style={styles.inviteItemLeft}>
-                          <View style={styles.inviteRoleIcon}>
-                            <Ionicons name="people" size={14} color={COLORS.secondary} />
-                          </View>
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.inviteTeamName}>
-                              {inv.teamName || 'Team Vault'}
-                            </Text>
-                            <Text style={styles.inviteCodeSnippet} numberOfLines={1}>
-                              {inv.inviteCode}
-                            </Text>
-                          </View>
-                        </View>
-                        <TouchableOpacity
-                          style={styles.inviteCopyBtn}
-                          onPress={() => handleCopyCode(inv.inviteCode)}
-                          activeOpacity={0.7}
-                        >
-                          <Ionicons
-                            name={copiedCode === inv.inviteCode ? 'checkmark' : 'copy-outline'}
-                            size={13}
-                            color={copiedCode === inv.inviteCode ? COLORS.primary : COLORS.textMuted}
-                          />
-                        </TouchableOpacity>
-                      </View>
-                    ))}
-                  </View>
-                )}
               </View>
             )}
 
@@ -801,60 +684,6 @@ const styles = StyleSheet.create({
     paddingBottom: 20,
   },
 
-  // Pending invites section
-  invitesSection: {
-    marginBottom: 16,
-  },
-  invitesSectionTitle: {
-    color: COLORS.secondary,
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-    marginBottom: 8,
-  },
-  inviteItemCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: COLORS.card,
-    borderRadius: 10,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    marginBottom: 6,
-  },
-  inviteItemLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  inviteRoleIcon: {
-    width: 28,
-    height: 28,
-    borderRadius: 7,
-    backgroundColor: 'rgba(6, 182, 212, 0.12)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-  },
-  inviteTeamName: {
-    color: COLORS.text,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  inviteCodeSnippet: {
-    color: COLORS.textMuted,
-    fontSize: 11,
-    marginTop: 1,
-  },
-  inviteCopyBtn: {
-    padding: 8,
-    borderRadius: 6,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-
   // Account details box
   detailsBox: {
     backgroundColor: COLORS.card,
@@ -863,40 +692,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     marginBottom: 14,
-  },
-  tourLauncherCard: {
-    backgroundColor: 'rgba(0, 229, 153, 0.08)',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(0, 229, 153, 0.25)',
-    padding: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 14,
-  },
-  tourLauncherLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  tourLauncherIconBox: {
-    width: 34,
-    height: 34,
-    borderRadius: 8,
-    backgroundColor: 'rgba(0, 229, 153, 0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-  },
-  tourLauncherTitle: {
-    color: COLORS.text,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  tourLauncherSub: {
-    color: COLORS.textMuted,
-    fontSize: 11,
-    marginTop: 2,
   },
   detailRow: {
     flexDirection: 'row',

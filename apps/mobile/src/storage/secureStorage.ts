@@ -1,9 +1,12 @@
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
-const ACCESS_TOKEN_KEY = 'tubo_auth_access_token';
-const REFRESH_TOKEN_KEY = 'tubo_auth_refresh_token';
-const USER_SESSION_KEY = 'tubo_auth_user_session';
+const ACCESS_TOKEN_KEY = 'env_auth_access_token';
+const LEGACY_ACCESS_TOKEN_KEY = 'tubo_auth_access_token';
+const REFRESH_TOKEN_KEY = 'env_auth_refresh_token';
+const LEGACY_REFRESH_TOKEN_KEY = 'tubo_auth_refresh_token';
+const USER_SESSION_KEY = 'env_auth_user_session';
+const LEGACY_USER_SESSION_KEY = 'tubo_auth_user_session';
 
 export interface UserInfo {
   id: string;
@@ -103,18 +106,18 @@ export async function getAuthSession(): Promise<AuthSession | null> {
 
   if (shouldUseSecureStore()) {
     try {
-      accessToken = await SecureStore.getItemAsync(ACCESS_TOKEN_KEY);
-      refreshToken = await SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
-      userJson = await SecureStore.getItemAsync(USER_SESSION_KEY);
+      accessToken = (await SecureStore.getItemAsync(ACCESS_TOKEN_KEY)) || (await SecureStore.getItemAsync(LEGACY_ACCESS_TOKEN_KEY));
+      refreshToken = (await SecureStore.getItemAsync(REFRESH_TOKEN_KEY)) || (await SecureStore.getItemAsync(LEGACY_REFRESH_TOKEN_KEY));
+      userJson = (await SecureStore.getItemAsync(USER_SESSION_KEY)) || (await SecureStore.getItemAsync(LEGACY_USER_SESSION_KEY));
     } catch (err) {
       console.warn('SecureStore read failed:', err);
     }
   }
 
   // Fall back to web/memory store if missing from SecureStore
-  accessToken = accessToken || getWebOrMemoryItem(ACCESS_TOKEN_KEY);
-  refreshToken = refreshToken || getWebOrMemoryItem(REFRESH_TOKEN_KEY);
-  userJson = userJson || getWebOrMemoryItem(USER_SESSION_KEY);
+  accessToken = accessToken || getWebOrMemoryItem(ACCESS_TOKEN_KEY) || getWebOrMemoryItem(LEGACY_ACCESS_TOKEN_KEY);
+  refreshToken = refreshToken || getWebOrMemoryItem(REFRESH_TOKEN_KEY) || getWebOrMemoryItem(LEGACY_REFRESH_TOKEN_KEY);
+  userJson = userJson || getWebOrMemoryItem(USER_SESSION_KEY) || getWebOrMemoryItem(LEGACY_USER_SESSION_KEY);
 
   if (!accessToken || !refreshToken || !userJson) {
     return null;
@@ -151,13 +154,13 @@ export async function saveTokens(accessToken: string, refreshToken: string): Pro
 export async function getStoredAccessToken(): Promise<string | null> {
   if (shouldUseSecureStore()) {
     try {
-      const val = await SecureStore.getItemAsync(ACCESS_TOKEN_KEY);
+      const val = (await SecureStore.getItemAsync(ACCESS_TOKEN_KEY)) || (await SecureStore.getItemAsync(LEGACY_ACCESS_TOKEN_KEY));
       if (val) return val;
     } catch (err) {
       console.warn('SecureStore getStoredAccessToken failed:', err);
     }
   }
-  return getWebOrMemoryItem(ACCESS_TOKEN_KEY);
+  return getWebOrMemoryItem(ACCESS_TOKEN_KEY) || getWebOrMemoryItem(LEGACY_ACCESS_TOKEN_KEY);
 }
 
 /**
@@ -166,13 +169,13 @@ export async function getStoredAccessToken(): Promise<string | null> {
 export async function getStoredRefreshToken(): Promise<string | null> {
   if (shouldUseSecureStore()) {
     try {
-      const val = await SecureStore.getItemAsync(REFRESH_TOKEN_KEY);
+      const val = (await SecureStore.getItemAsync(REFRESH_TOKEN_KEY)) || (await SecureStore.getItemAsync(LEGACY_REFRESH_TOKEN_KEY));
       if (val) return val;
     } catch (err) {
       console.warn('SecureStore getStoredRefreshToken failed:', err);
     }
   }
-  return getWebOrMemoryItem(REFRESH_TOKEN_KEY);
+  return getWebOrMemoryItem(REFRESH_TOKEN_KEY) || getWebOrMemoryItem(LEGACY_REFRESH_TOKEN_KEY);
 }
 
 /**
@@ -204,14 +207,20 @@ export async function clearAuthSession(): Promise<void> {
   if (shouldUseSecureStore()) {
     try {
       await SecureStore.deleteItemAsync(ACCESS_TOKEN_KEY);
+      await SecureStore.deleteItemAsync(LEGACY_ACCESS_TOKEN_KEY).catch(() => {});
       await SecureStore.deleteItemAsync(REFRESH_TOKEN_KEY);
+      await SecureStore.deleteItemAsync(LEGACY_REFRESH_TOKEN_KEY).catch(() => {});
       await SecureStore.deleteItemAsync(USER_SESSION_KEY);
+      await SecureStore.deleteItemAsync(LEGACY_USER_SESSION_KEY).catch(() => {});
     } catch (err) {
       console.warn('SecureStore clear failed:', err);
     }
   }
 
   removeWebOrMemoryItem(ACCESS_TOKEN_KEY);
+  removeWebOrMemoryItem(LEGACY_ACCESS_TOKEN_KEY);
   removeWebOrMemoryItem(REFRESH_TOKEN_KEY);
+  removeWebOrMemoryItem(LEGACY_REFRESH_TOKEN_KEY);
   removeWebOrMemoryItem(USER_SESSION_KEY);
+  removeWebOrMemoryItem(LEGACY_USER_SESSION_KEY);
 }

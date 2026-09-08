@@ -185,6 +185,22 @@ export function TeamScreen({
   const teamsForSelectedWs = (allTeams || []).filter(t => t.workspaceId === selectedInviteWsId);
 
   const openInviteModal = () => {
+    if (!workspaceId) {
+      showCustomAlert({
+        title: 'Workspace Required',
+        message: 'You need to create a workspace and a team before you can invite members.',
+        type: 'warning',
+      });
+      return;
+    }
+    if (!teamId) {
+      showCustomAlert({
+        title: 'Team Required',
+        message: 'Please create or select a team before inviting members.',
+        type: 'warning',
+      });
+      return;
+    }
     setSelectedInviteWsId(workspaceId);
     setSelectedInviteTeamId(teamId);
     setWsDropdownOpen(false);
@@ -260,7 +276,8 @@ export function TeamScreen({
 
   const handleCopyInviteLink = async (inviteCode: string) => {
     try {
-      const inviteUrl = `${apiBaseUrl}/auth/accept-invite?token=${inviteCode}`;
+      const baseUrl = (apiBaseUrl || '').replace(/\/+$/, '');
+      const inviteUrl = `${baseUrl}/auth/accept-invite?token=${encodeURIComponent(inviteCode)}`;
       await Clipboard.setStringAsync(inviteUrl);
       showCustomAlert({
         title: 'Link Copied! 📋',
@@ -292,6 +309,35 @@ export function TeamScreen({
         type: 'danger',
       });
       return;
+    }
+
+    const cleanEmail = formData.email.trim().toLowerCase();
+
+    // Check if the user is already in this team or already has a pending invite
+    if (selectedInviteTeamId === teamId) {
+      const isAlreadyMember = members.some(
+        m => (m.userEmail || '').toLowerCase().trim() === cleanEmail
+      );
+      if (isAlreadyMember) {
+        showCustomAlert({
+          title: 'Already a Member',
+          message: `${formData.email.trim()} is already a member of this team.`,
+          type: 'warning',
+        });
+        return;
+      }
+
+      const hasPendingInvite = invites.some(
+        i => i.email.toLowerCase().trim() === cleanEmail && i.status === 'pending'
+      );
+      if (hasPendingInvite) {
+        showCustomAlert({
+          title: 'Already Invited',
+          message: `An active invitation has already been sent to ${formData.email.trim()} for this team. You can copy the invite link from the invites list below.`,
+          type: 'warning',
+        });
+        return;
+      }
     }
 
     setInviting(true);
@@ -373,10 +419,11 @@ export function TeamScreen({
 
   const handleRemoveMember = (member: TeamMember) => {
     const memberName = member.userName || member.userEmail || 'this member';
-    Alert.alert(
-      'Remove Member',
-      `Are you sure you want to remove ${memberName} from this team?`,
-      [
+    showCustomAlert({
+      title: 'Remove Member',
+      message: `Are you sure you want to remove ${memberName} from this team?`,
+      type: 'danger',
+      buttons: [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Remove',
@@ -411,8 +458,8 @@ export function TeamScreen({
             }
           },
         },
-      ]
-    );
+      ],
+    });
   };
 
   const openManageTeamModal = () => {

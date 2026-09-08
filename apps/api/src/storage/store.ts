@@ -18,7 +18,7 @@ import {
   isNull,
   inArray,
 } from '@tubo/db';
-import { tokenStore, hashToken } from './tokenStore.js';
+import { tokenStore, hashToken, encryptToken, decryptToken } from './tokenStore.js';
 import {
   encryptEnvValue,
   decryptEnvValue,
@@ -600,15 +600,17 @@ export const dataStore = {
     role: 'admin' | 'member';
     invitedBy: string;
   }): Promise<TeamInviteItem> {
-    const code = 'INV-TUBO-' + crypto.randomBytes(16).toString('hex').toUpperCase();
-    const hashedCode = hashToken(code);
+    // Generate clean 32-byte hex token (NO 'INV-TUBO-' prefix)
+    const code = crypto.randomBytes(32).toString('hex');
+    const storedCode = encryptToken(code);
+
     const newInvite = {
       id: crypto.randomUUID(),
       teamId: inv.teamId,
       workspaceId: inv.workspaceId,
       email: inv.email.toLowerCase().trim(),
       role: inv.role,
-      inviteCode: hashedCode,
+      inviteCode: storedCode, // Stored encrypted in PostgreSQL
       status: 'pending' as const,
       invitedBy: inv.invitedBy,
       createdAt: new Date(),
@@ -624,7 +626,7 @@ export const dataStore = {
     });
     return {
       ...newInvite,
-      inviteCode: code, // Retain raw code for URL generation
+      inviteCode: code, // Raw clean token returned for email & instant usage
     };
   },
 
@@ -636,7 +638,7 @@ export const dataStore = {
       workspaceId: r.workspaceId,
       email: r.email,
       role: r.role,
-      inviteCode: r.inviteCode,
+      inviteCode: decryptToken(r.inviteCode), // Decrypt so copy button and email link are identical!
       status: r.status,
       invitedBy: r.invitedBy,
       createdAt: r.createdAt,
@@ -650,11 +652,19 @@ export const dataStore = {
       return null;
     }
 
-    // 2. Fetch corresponding team_invites record
+    // 2. Fetch corresponding team_invites record (match encrypted token, raw code, or SHA-256 hash)
+    const enc = encryptToken(inviteCode);
+    const hashed = hashToken(inviteCode);
     const invites = await pgDb
       .select()
       .from(teamInvites)
-      .where(eq(teamInvites.inviteCode, hashToken(inviteCode)));
+      .where(
+        or(
+          eq(teamInvites.inviteCode, enc),
+          eq(teamInvites.inviteCode, inviteCode),
+          eq(teamInvites.inviteCode, hashed)
+        )
+      );
     if (invites.length === 0 || invites[0].status !== 'pending') {
       return null;
     }
@@ -819,11 +829,19 @@ export const dataStore = {
       throw new Error('This invitation link has expired (valid for 1 hour) or is invalid.');
     }
 
-    // 3. Locate invite by code
+    // 3. Locate invite by code (match encrypted token, raw code, or SHA-256 hash)
+    const enc = encryptToken(inviteCode);
+    const hashed = hashToken(inviteCode);
     const invites = await pgDb
       .select()
       .from(teamInvites)
-      .where(eq(teamInvites.inviteCode, hashToken(inviteCode)));
+      .where(
+        or(
+          eq(teamInvites.inviteCode, enc),
+          eq(teamInvites.inviteCode, inviteCode),
+          eq(teamInvites.inviteCode, hashed)
+        )
+      );
 
     if (invites.length === 0) {
       throw new Error('Invalid invite code');
@@ -1428,7 +1446,7 @@ export const dataStore = {
     const formatDotEnv = (items: EnvItem[], folderTitle: string): string => {
       const header = [
         `# ==========================================`,
-        `# Tubo Vault Environment Export`,
+        `# Env Vault Environment Export`,
         `# Team: ${team?.name || teamId}`,
         `# Folder: ${folderTitle}`,
         `# Environment: ${environment}`,
@@ -1477,14 +1495,14 @@ export const dataStore = {
     }
 
     // Name the zip file based on single vs multiple
-    let fileName = `tubo_${teamNameSlug}_${environment}_envs.zip`;
+    let fileName = `env_${teamNameSlug}_${environment}_envs.zip`;
     if (folderIds && folderIds.length === 1) {
       const singleId = folderIds[0];
       const singleFolder = singleId ? folderMap.get(singleId) : null;
       const singleName = singleFolder
         ? singleFolder.name.toLowerCase().replace(/[^a-z0-9_-]/g, '_')
         : 'root';
-      fileName = `tubo_${teamNameSlug}_${singleName}_${environment}.zip`;
+      fileName = `env_${teamNameSlug}_${singleName}_${environment}.zip`;
     }
 
     const buffer = await zip.generateAsync({

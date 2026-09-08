@@ -50,7 +50,7 @@ export const teamInvites = pgTable('team_invites', {
   workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
   email: varchar('email', { length: 255 }).notNull(),
   role: varchar('role', { length: 50 }).$type<'admin' | 'member'>().default('member').notNull(),
-  inviteCode: varchar('invite_code', { length: 64 }).notNull().unique(),
+  inviteCode: text('invite_code').notNull().unique(),
   status: varchar('status', { length: 50 }).$type<'pending' | 'accepted' | 'expired'>().default('pending').notNull(),
   invitedBy: uuid('invited_by').notNull().references(() => users.id, { onDelete: 'cascade' }),
   createdAt: timestamp('created_at').defaultNow().notNull(),

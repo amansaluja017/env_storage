@@ -71,6 +71,13 @@
       "when": 1788779139746,
       "tag": "0009_clever_glorian",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788809594241,
+      "tag": "0010_bizarre_meltdown",
+      "breakpoints": true
     }
   ]
 }

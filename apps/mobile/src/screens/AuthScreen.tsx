@@ -51,9 +51,9 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
     formState: { errors },
   } = useForm<AuthFormData>({
     defaultValues: {
-      email: typeof __DEV__ !== 'undefined' && __DEV__ ? 'alex@tubo.dev' : '',
-      password: typeof __DEV__ !== 'undefined' && __DEV__ ? 'password123' : '',
-      name: typeof __DEV__ !== 'undefined' && __DEV__ ? 'Alex Vance' : '',
+      email: '',
+      password: '',
+      name: '',
     },
   });
 
@@ -131,7 +131,7 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
 
       showCustomAlert({
         title: 'Password Reset Sent',
-        message: `If an account exists for ${targetEmail}, password reset instructions have been dispatched via email.`,
+        message: `Password reset instructions have been sent to ${targetEmail}. Please check your email inbox.`,
         type: 'success',
         buttons: previewUrl
           ? [
@@ -142,12 +142,21 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
                 onPress: () => Linking.openURL(previewUrl),
               },
             ]
-          : [{ text: 'OK', style: 'default' }],
+          : [{ text: 'Got it', style: 'default' }],
       });
     } catch (err: any) {
+      const msg =
+        err.response?.data?.error?.message ||
+        err.message ||
+        'Unable to request password reset.';
+      const isNotFound =
+        msg.toLowerCase().includes('not registered') ||
+        msg.toLowerCase().includes('no account') ||
+        err.response?.status === 404;
+
       showCustomAlert({
-        title: 'Reset Error',
-        message: err.message || 'Unable to request password reset.',
+        title: isNotFound ? 'Email Not Registered' : 'Password Reset Failed',
+        message: msg,
         type: 'danger',
       });
     } finally {

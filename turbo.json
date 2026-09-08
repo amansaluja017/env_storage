@@ -12,9 +12,6 @@
     "start": {
       "cache": false,
       "persistent": true
-    },
-    "seed": {
-      "cache": false
     }
   }
 }

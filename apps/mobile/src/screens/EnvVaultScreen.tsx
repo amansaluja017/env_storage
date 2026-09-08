@@ -29,11 +29,12 @@ import {
   getMobileVaultStats,
   syncFoldersFromRemote,
   syncEnvsFromRemote,
+  enqueueSyncItem,
   EnvItem,
   FolderItem,
 } from '../storage/mobileSqlite';
+import { mobileSyncManager, useMobileSyncStatus } from '../storage/mobileSyncManager';
 import { apiClient } from '../utils/apiClient';
-import { SqliteInspectorModal } from '../components/SqliteInspectorModal';
 import { ExportEnvsModal } from '../components/ExportEnvsModal';
 import { showCustomAlert } from '../components/CustomAlert';
 import { FoldersListSkeleton, EnvsListSkeleton } from '../components/Skeleton';
@@ -59,12 +60,12 @@ interface EnvFormData {
 
 interface CreateFolderFormData {
   name: string;
-  description: string;
+  description?: string;
 }
 
 interface RawDotEnvFormData {
   rawDotEnv: string;
-  folderId: string;
+  folderId?: string;
 }
 
 export interface FolderMenuTarget {
@@ -86,10 +87,16 @@ export function EnvVaultScreen({
   user,
   refreshTrigger,
 }: EnvVaultScreenProps) {
-  const sqliteBadgeTargetRef = useTourTarget('tour-sqlite-badge');
   const envTabsTargetRef = useTourTarget('tour-env-tabs');
   const searchBarTargetRef = useTourTarget('tour-search-bar');
   const newFolderBtnTargetRef = useTourTarget('tour-new-folder-btn');
+  const footerDockTargetRef = useTourTarget('tour-footer-dock');
+  const footerAddKeyTargetRef = useTourTarget('tour-footer-add-key');
+  const footerNewFolderTargetRef = useTourTarget('tour-footer-new-folder');
+  const footerImportEnvTargetRef = useTourTarget('tour-footer-import-env');
+  const footerBackupTargetRef = useTourTarget('tour-footer-backup');
+
+  const syncStatus = useMobileSyncStatus();
 
   const [environment, setEnvironment] = useState<'development' | 'staging' | 'production'>('development');
   const [envsList, setEnvsList] = useState<EnvItem[]>([]);
@@ -121,6 +128,8 @@ export function EnvVaultScreen({
     }).start();
 
     try {
+      // Drain pending mutations first before refreshing view
+      await mobileSyncManager.triggerSync(apiBaseUrl);
       if (selectedFolderId !== null) {
         await fetchEnvs(true);
       } else {
@@ -189,8 +198,6 @@ export function EnvVaultScreen({
     },
   });
 
-  // SQLite DB Inspector Modal State
-  const [sqliteModalVisible, setSqliteModalVisible] = useState(false);
   const [dbReady, setDbReady] = useState(false);
 
   // Export Envs ZIP Modal State
@@ -204,12 +211,16 @@ export function EnvVaultScreen({
 
   useEffect(() => {
     initMobileSqlite()
-      .then(() => setDbReady(true))
+      .then(() => {
+        setDbReady(true);
+        mobileSyncManager.setApiBaseUrl(apiBaseUrl);
+        mobileSyncManager.triggerSync(apiBaseUrl);
+      })
       .catch((err) => {
         console.log('Error initializing mobile SQLite:', err);
         setDbReady(true);
       });
-  }, []);
+  }, [apiBaseUrl]);
 
   // Fetch logged in user's role in this team to evaluate admin privileges
   useEffect(() => {
@@ -410,25 +421,29 @@ export function EnvVaultScreen({
     const creatorName = user?.name || 'Mobile User';
     try {
       if (editingFolderId) {
-        // Edit existing folder
+        // 1. Edit existing folder in SQLite first
         await updateMobileFolder(editingFolderId, data.name, data.description);
         setFolderModalVisible(false);
         resetFolderForm({ name: '', description: '' });
+        const updatedId = editingFolderId;
         setEditingFolderId(null);
         await fetchFolders();
 
-        apiClient
-          .post(`${apiBaseUrl}/trpc/folder.update`, {
-            folderId: editingFolderId,
+        // 2. Enqueue sync & trigger background worker
+        await enqueueSyncItem({
+          entityType: 'folder',
+          entityId: updatedId,
+          action: 'update',
+          payload: {
+            folderId: updatedId,
             teamId,
             name: data.name,
             description: data.description || undefined,
-          })
-          .catch((err) => {
-            console.warn('Background sync to PostgreSQL failed for folder update:', err?.message || err);
-          });
+          },
+        });
+        mobileSyncManager.triggerSync(apiBaseUrl);
       } else {
-        // Create new folder
+        // 1. Create new folder in SQLite first (instant local response)
         const newFolder = await createMobileFolder({
           workspaceId,
           teamId,
@@ -444,18 +459,21 @@ export function EnvVaultScreen({
         setSelectedFolderId(newFolder.id);
         await fetchFolders();
 
-        apiClient
-          .post(`${apiBaseUrl}/trpc/folder.create`, {
+        // 2. Enqueue sync & trigger background worker
+        await enqueueSyncItem({
+          entityType: 'folder',
+          entityId: newFolder.id,
+          action: 'create',
+          payload: {
             id: newFolder.id,
             workspaceId,
             teamId,
             environment,
             name: data.name,
             description: data.description || undefined,
-          })
-          .catch((err) => {
-            console.warn('Background sync to PostgreSQL failed for folder:', err?.message || err);
-          });
+          },
+        });
+        mobileSyncManager.triggerSync(apiBaseUrl);
       }
     } catch (e: any) {
       showCustomAlert({
@@ -490,7 +508,7 @@ export function EnvVaultScreen({
           style: 'destructive',
           onPress: async () => {
             try {
-              // 1. Delete in SQLite first
+              // 1. Delete in SQLite first (instant local response)
               await deleteMobileFolder(folder.id, false);
               if (selectedFolderId === folder.id) {
                 setSelectedFolderId(null);
@@ -500,16 +518,18 @@ export function EnvVaultScreen({
                 await fetchEnvs();
               }
 
-              // 2. Delete from PostgreSQL in background
-              apiClient
-                .post(`${apiBaseUrl}/trpc/folder.delete`, {
+              // 2. Enqueue deletion & trigger background sync
+              await enqueueSyncItem({
+                entityType: 'folder',
+                entityId: folder.id,
+                action: 'delete',
+                payload: {
                   folderId: folder.id,
                   teamId,
                   deleteEnvs: false,
-                })
-                .catch((err) => {
-                  console.warn('Background delete folder from PostgreSQL failed:', err?.message || err);
-                });
+                },
+              });
+              mobileSyncManager.triggerSync(apiBaseUrl);
             } catch (e: any) {
               showCustomAlert({
                 title: 'Delete Failed',
@@ -528,7 +548,9 @@ export function EnvVaultScreen({
     setSubmitting(true);
     const creatorName = user?.name || 'Mobile User';
     try {
-      // 1. Write to SQLite first
+      const isEditing = Boolean(editingId);
+
+      // 1. Write to SQLite first (instant local response)
       const saved = await upsertMobileEnv({
         id: editingId || undefined,
         workspaceId,
@@ -561,9 +583,12 @@ export function EnvVaultScreen({
         await fetchFolders();
       }
 
-      // 2. Persist to PostgreSQL in background
-      apiClient
-        .post(`${apiBaseUrl}/trpc/env.upsert`, {
+      // 2. Enqueue sync & trigger background worker
+      await enqueueSyncItem({
+        entityType: 'env',
+        entityId: saved.id,
+        action: isEditing ? 'update' : 'create',
+        payload: {
           id: saved.id,
           workspaceId,
           teamId,
@@ -573,10 +598,9 @@ export function EnvVaultScreen({
           value: data.value,
           isSecret: data.isSecret,
           comment: data.comment || undefined,
-        })
-        .catch((err) => {
-          console.warn('Background sync to PostgreSQL failed for env:', err?.message || err);
-        });
+        },
+      });
+      mobileSyncManager.triggerSync(apiBaseUrl);
     } catch (e: any) {
       showCustomAlert({
         title: 'Save Failed',
@@ -610,7 +634,7 @@ export function EnvVaultScreen({
           style: 'destructive',
           onPress: async () => {
             try {
-              // 1. Delete from SQLite first
+              // 1. Delete from SQLite first (instant local response)
               await deleteMobileEnv(id);
               if (selectedFolderId !== null) {
                 await fetchEnvs();
@@ -618,15 +642,17 @@ export function EnvVaultScreen({
                 await fetchFolders();
               }
 
-              // 2. Delete from PostgreSQL in background
-              apiClient
-                .post(`${apiBaseUrl}/trpc/env.delete`, {
+              // 2. Enqueue deletion & trigger background sync
+              await enqueueSyncItem({
+                entityType: 'env',
+                entityId: id,
+                action: 'delete',
+                payload: {
                   id,
                   teamId,
-                })
-                .catch((err) => {
-                  console.warn('Background delete env from PostgreSQL failed:', err?.message || err);
-                });
+                },
+              });
+              mobileSyncManager.triggerSync(apiBaseUrl);
             } catch (e: any) {
               showCustomAlert({
                 title: 'Delete Error',
@@ -651,7 +677,7 @@ export function EnvVaultScreen({
           : null;
       const targetFolderId = data.folderId || defaultFolder;
 
-      // 1. Import to SQLite first
+      // 1. Import to SQLite first (instant local response)
       await bulkImportMobileEnvs(
         workspaceId,
         teamId,
@@ -669,29 +695,20 @@ export function EnvVaultScreen({
         await fetchFolders();
       }
 
-      // 2. Persist bulk import to PostgreSQL in background
-      apiClient
-        .post(`${apiBaseUrl}/trpc/env.bulkImport`, {
+      // 2. Enqueue bulk import & trigger background sync
+      await enqueueSyncItem({
+        entityType: 'env',
+        entityId: `bulk-${Date.now()}`,
+        action: 'bulk_import',
+        payload: {
           workspaceId,
           teamId,
           environment,
           folderId: targetFolderId,
           rawDotEnv: data.rawDotEnv,
-        })
-        .then(async (res) => {
-          const imported = res.data?.result?.data;
-          if (Array.isArray(imported)) {
-            await syncEnvsFromRemote(workspaceId, teamId, environment, imported);
-            if (selectedFolderId !== null) {
-              await fetchEnvs();
-            } else {
-              await fetchFolders();
-            }
-          }
-        })
-        .catch((err) => {
-          console.warn('Background bulk import to PostgreSQL failed:', err?.message || err);
-        });
+        },
+      });
+      mobileSyncManager.triggerSync(apiBaseUrl);
     } catch (e: any) {
       showCustomAlert({
         title: 'Import Failed',
@@ -778,19 +795,41 @@ export function EnvVaultScreen({
 
   return (
     <View style={styles.container}>
-      {/* DB Engine Badge & Inspector Trigger (shown in Folders view) */}
+      {/* Vault Status & Sync (shown in Folders view) */}
       {selectedFolderId === null && (
-        <TouchableOpacity
-          ref={sqliteBadgeTargetRef}
-          style={styles.engineBar}
-          onPress={() => setSqliteModalVisible(true)}
-          activeOpacity={0.7}
-        >
-          <View style={styles.engineBadge}>
-            <Text style={styles.engineBadgeText}>🗄️ SQLite Engine Active</Text>
+        <View style={styles.syncBar}>
+          <View style={styles.vaultSecurityBadge}>
+            <Ionicons name="shield-checkmark" size={13} color={COLORS.primary} style={{ marginRight: 5 }} />
+            <Text style={styles.vaultSecurityText}>Encrypted Vault</Text>
           </View>
-          <Text style={styles.inspectLink}>Inspect SQLite DB Data →</Text>
-        </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.syncStatusBadge,
+              syncStatus.isSyncing && styles.syncStatusBadgeSyncing,
+              syncStatus.pendingCount > 0 && !syncStatus.isSyncing && styles.syncStatusBadgePending,
+            ]}
+            onPress={() => mobileSyncManager.triggerSync(apiBaseUrl)}
+            activeOpacity={0.7}
+          >
+            {syncStatus.isSyncing ? (
+              <>
+                <ActivityIndicator size="small" color="#3b82f6" style={{ marginRight: 4 }} />
+                <Text style={[styles.syncStatusText, { color: '#3b82f6' }]}>Syncing...</Text>
+              </>
+            ) : syncStatus.pendingCount > 0 ? (
+              <>
+                <Ionicons name="cloud-upload-outline" size={12} color="#f59e0b" style={{ marginRight: 4 }} />
+                <Text style={[styles.syncStatusText, { color: '#f59e0b' }]}>{syncStatus.pendingCount} pending</Text>
+              </>
+            ) : (
+              <>
+                <Ionicons name="cloud-done" size={12} color="#22c55e" style={{ marginRight: 4 }} />
+                <Text style={[styles.syncStatusText, { color: '#22c55e' }]}>Synced</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
       )}
 
       {/* Environment Selector Tabs (shown in Folders view) */}
@@ -924,7 +963,15 @@ export function EnvVaultScreen({
                     <Text style={styles.folderIconText}>📁</Text>
                   </View>
                   <View style={styles.folderCardInfo}>
-                    <Text style={styles.folderCardTitle}>{folder.name}</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Text style={styles.folderCardTitle}>{folder.name}</Text>
+                      {folder.syncStatus && folder.syncStatus !== 'synced' && (
+                        <View style={[styles.pendingSyncTag, { marginLeft: 6 }]}>
+                          <Ionicons name="time-outline" size={9} color="#f59e0b" style={{ marginRight: 2 }} />
+                          <Text style={styles.pendingSyncTagText}>Syncing</Text>
+                        </View>
+                      )}
+                    </View>
                     <Text style={styles.folderCardDesc} numberOfLines={1}>
                       {folder.description || 'No description provided'}
                     </Text>
@@ -1021,9 +1068,10 @@ export function EnvVaultScreen({
           </ScrollView>
 
           {/* Redesigned Vault Bottom Actions Dock */}
-          <View style={styles.vaultFooterDock}>
+          <View ref={footerDockTargetRef} style={styles.vaultFooterDock}>
             {/* 1. Add Key Action */}
             <TouchableOpacity
+              ref={footerAddKeyTargetRef}
               style={styles.dockActionBtn}
               onPress={() => openAdd('')}
               activeOpacity={0.65}
@@ -1039,6 +1087,7 @@ export function EnvVaultScreen({
 
             {/* 2. New Folder Action */}
             <TouchableOpacity
+              ref={footerNewFolderTargetRef}
               style={styles.dockActionBtn}
               onPress={openCreateFolder}
               activeOpacity={0.65}
@@ -1054,6 +1103,7 @@ export function EnvVaultScreen({
 
             {/* 3. Import .env Action */}
             <TouchableOpacity
+              ref={footerImportEnvTargetRef}
               style={styles.dockActionBtn}
               onPress={openRawModal}
               activeOpacity={0.65}
@@ -1069,6 +1119,7 @@ export function EnvVaultScreen({
 
             {/* 4. Backup Vault Action */}
             <TouchableOpacity
+              ref={footerBackupTargetRef}
               style={styles.dockActionBtn}
               onPress={() => openExportModal(null)}
               activeOpacity={0.65}
@@ -1115,6 +1166,34 @@ export function EnvVaultScreen({
             </View>
 
             <View style={{ flex: 1 }} />
+
+            <TouchableOpacity
+              style={[
+                styles.syncStatusBadge,
+                syncStatus.isSyncing && styles.syncStatusBadgeSyncing,
+                syncStatus.pendingCount > 0 && !syncStatus.isSyncing && styles.syncStatusBadgePending,
+                { marginRight: 8 },
+              ]}
+              onPress={() => mobileSyncManager.triggerSync(apiBaseUrl)}
+              activeOpacity={0.7}
+            >
+              {syncStatus.isSyncing ? (
+                <>
+                  <ActivityIndicator size="small" color="#3b82f6" style={{ marginRight: 4 }} />
+                  <Text style={[styles.syncStatusText, { color: '#3b82f6' }]}>Syncing...</Text>
+                </>
+              ) : syncStatus.pendingCount > 0 ? (
+                <>
+                  <Ionicons name="cloud-upload-outline" size={12} color="#f59e0b" style={{ marginRight: 4 }} />
+                  <Text style={[styles.syncStatusText, { color: '#f59e0b' }]}>{syncStatus.pendingCount}</Text>
+                </>
+              ) : (
+                <>
+                  <Ionicons name="cloud-done" size={12} color="#22c55e" style={{ marginRight: 4 }} />
+                  <Text style={[styles.syncStatusText, { color: '#22c55e' }]}>Synced</Text>
+                </>
+              )}
+            </TouchableOpacity>
 
             <View style={styles.breadcrumbEnvBadge}>
               <Text style={styles.breadcrumbEnvText}>{environment.toUpperCase()}</Text>
@@ -1262,6 +1341,12 @@ export function EnvVaultScreen({
                     <View style={styles.cardHeader}>
                       <View style={styles.keyBadgeContainer}>
                         <Text style={styles.keyName}>{item.key}</Text>
+                        {item.syncStatus && item.syncStatus !== 'synced' && (
+                          <View style={[styles.pendingSyncTag, { marginLeft: 4 }]}>
+                            <Ionicons name="time-outline" size={9} color="#f59e0b" style={{ marginRight: 2 }} />
+                            <Text style={styles.pendingSyncTagText}>Syncing</Text>
+                          </View>
+                        )}
                         {item.isSecret && (
                           <View style={styles.secretTag}>
                             <Text style={styles.secretTagText}>SECRET</Text>
@@ -1548,7 +1633,7 @@ export function EnvVaultScreen({
                 {submitting ? (
                   <ActivityIndicator color="#000" />
                 ) : (
-                  <Text style={styles.saveBtnText}>Save to SQLite</Text>
+                  <Text style={styles.saveBtnText}>Save Variable</Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -1567,7 +1652,7 @@ export function EnvVaultScreen({
               </TouchableOpacity>
             </View>
             <Text style={styles.modalSubtitle}>
-              Paste raw .env content below to bulk import into SQLite.
+              Paste raw .env content below to bulk import into vault.
             </Text>
 
             {/* Folder Target Picker for Bulk Import */}
@@ -1777,12 +1862,6 @@ export function EnvVaultScreen({
         </TouchableOpacity>
       </Modal>
 
-      {/* In-App SQLite DB Inspector Modal */}
-      <SqliteInspectorModal
-        visible={sqliteModalVisible}
-        onClose={() => setSqliteModalVisible(false)}
-      />
-
       {/* Export Envs ZIP Modal */}
       <ExportEnvsModal
         visible={exportModalVisible}
@@ -1806,7 +1885,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bg,
     padding: 16,
   },
-  engineBar: {
+  syncBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -1818,23 +1897,53 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     marginBottom: 12,
   },
-  engineBadge: {
-    backgroundColor: COLORS.primaryGlow,
+  vaultSecurityBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  vaultSecurityText: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+  syncStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(34, 197, 94, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(34, 197, 94, 0.3)',
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 6,
+  },
+  syncStatusBadgeSyncing: {
+    backgroundColor: 'rgba(59, 130, 246, 0.12)',
+    borderColor: 'rgba(59, 130, 246, 0.35)',
+  },
+  syncStatusBadgePending: {
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    borderColor: 'rgba(245, 158, 11, 0.35)',
+  },
+  syncStatusText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  pendingSyncTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
     borderWidth: 1,
-    borderColor: COLORS.primary,
+    borderColor: 'rgba(245, 158, 11, 0.3)',
   },
-  engineBadgeText: {
-    color: COLORS.primary,
-    fontSize: 11,
+  pendingSyncTagText: {
+    color: '#f59e0b',
+    fontSize: 9,
     fontWeight: '800',
-  },
-  inspectLink: {
-    color: COLORS.textMuted,
-    fontSize: 11,
-    fontWeight: '600',
+    letterSpacing: 0.5,
   },
   envTabsRow: {
     flexDirection: 'row',

@@ -5,7 +5,7 @@ import { testEmailDelivery } from '../src/services/emailService.js';
 
 async function main() {
   const targetEmail = process.argv[2] || process.env.GMAIL_USER || 'test@example.com';
-  console.log(`\n🧪 Testing Tubo Vault email delivery to: ${targetEmail}`);
+  console.log(`\n🧪 Testing Env Vault email delivery to: ${targetEmail}`);
 
   const res = await testEmailDelivery(targetEmail);
   console.log(`Provider detected: ${res.provider}`);

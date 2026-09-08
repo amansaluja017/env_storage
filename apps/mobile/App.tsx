@@ -299,14 +299,26 @@ function MainApp() {
         .catch(() => {});
     };
 
+    const handleIncomingUrl = (url: string | null) => {
+      if (!url) return;
+      console.log('Incoming deep link URL:', url);
+      handleRefreshUser();
+      if (url.includes('team')) {
+        setActiveTab('team');
+        handleRefresh();
+      }
+    };
+
+    Linking.getInitialURL().then(handleIncomingUrl).catch(() => {});
+
     const stateSub = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
         handleRefreshUser();
       }
     });
 
-    const linkSub = Linking.addEventListener('url', () => {
-      handleRefreshUser();
+    const linkSub = Linking.addEventListener('url', (event) => {
+      handleIncomingUrl(event.url);
     });
 
     return () => {
@@ -406,7 +418,25 @@ function MainApp() {
               teams={teams}
               activeTeamId={activeTeamId}
               onSelectTeam={setActiveTeamId}
-              onOpenCreateTeam={() => setTeamModalOpen(true)}
+              onOpenCreateTeam={() => {
+                if (workspaces.length === 0 || !activeWorkspaceId) {
+                  showCustomAlert({
+                    title: 'Workspace Required',
+                    message: 'You must create a workspace first before creating a team. Workspaces keep your teams and secrets organized.',
+                    type: 'warning',
+                    buttons: [
+                      { text: 'Cancel', style: 'cancel' },
+                      {
+                        text: 'Create Workspace',
+                        style: 'default',
+                        onPress: () => setWsModalOpen(true),
+                      },
+                    ],
+                  });
+                  return;
+                }
+                setTeamModalOpen(true);
+              }}
               onTeamUpdated={handleTeamUpdated}
               onTeamDeleted={handleTeamDeleted}
               activeTab={activeTab}

@@ -20,7 +20,7 @@ export function renderEmailVerifiedPage(success: boolean, emailOrError: string):
       <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>${success ? 'Email Verified' : 'Verification Failed'} - Tubo Vault</title>
+        <title>${success ? 'Email Verified' : 'Verification Failed'} - Env Vault</title>
         <style>
           * { box-sizing: border-box; }
           body {
@@ -91,6 +91,20 @@ export function renderEmailVerifiedPage(success: boolean, emailOrError: string):
             color: #71717a;
           }
         </style>
+        <script>
+          function openAppHome(e) {
+            if (e && e.preventDefault) e.preventDefault();
+            var isAndroid = /android/i.test(navigator.userAgent);
+            var schemeUrl = "envvault://";
+            var intentUrl = "intent://#Intent;scheme=envvault;package=com.dreamvisaimmigration001.envvault;end";
+            if (isAndroid) {
+              window.location.href = intentUrl;
+              setTimeout(function() { window.location.href = schemeUrl; }, 400);
+            } else {
+              window.location.href = schemeUrl;
+            }
+          }
+        </script>
       </head>
       <body>
         <div class="card">
@@ -101,11 +115,11 @@ export function renderEmailVerifiedPage(success: boolean, emailOrError: string):
           <p>
             ${
               success
-                ? `Your account email address has been successfully updated to <span class="highlight">${safeEmailOrError}</span>. You can now return to the Tubo app.`
+                ? `Your account email address has been successfully updated to <span class="highlight">${safeEmailOrError}</span>. You can now return to the Env Vault app.`
                 : safeEmailOrError || 'This verification link is invalid, expired, or has already been consumed.'
             }
           </p>
-          <a href="tubo://" class="btn">Return to Tubo App</a>
+          <a href="envvault://" class="btn" onclick="openAppHome(event)">Return to Env Vault App</a>
           <div class="footer-text">
             If the button doesn't open the app automatically, you can simply switch back to the application.
           </div>
@@ -124,7 +138,7 @@ export function renderResetPasswordPortal(token: string, error?: string): string
       <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Reset Password - Tubo Vault</title>
+        <title>Reset Password - Env Vault</title>
         <style>
           * { box-sizing: border-box; }
           body {
@@ -245,7 +259,7 @@ export function renderResetPasswordPortal(token: string, error?: string): string
       </head>
       <body>
         <div class="card">
-          <div class="brand-badge">TUBO VAULT • SECURITY</div>
+          <div class="brand-badge">ENV VAULT • SECURITY</div>
           <h1>Set New Password</h1>
           <p class="subtitle">Choose a secure password with at least 6 characters.</p>
 
@@ -316,7 +330,7 @@ export function renderPasswordResetSuccessPage(): string {
       <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Password Reset Successful - Tubo Vault</title>
+        <title>Password Reset Successful - Env Vault</title>
         <style>
           * { box-sizing: border-box; }
           body {
@@ -377,13 +391,27 @@ export function renderPasswordResetSuccessPage(): string {
           }
           .btn:hover { opacity: 0.9; }
         </style>
+        <script>
+          function openAppHome(e) {
+            if (e && e.preventDefault) e.preventDefault();
+            var isAndroid = /android/i.test(navigator.userAgent);
+            var schemeUrl = "envvault://";
+            var intentUrl = "intent://#Intent;scheme=envvault;package=com.dreamvisaimmigration001.envvault;end";
+            if (isAndroid) {
+              window.location.href = intentUrl;
+              setTimeout(function() { window.location.href = schemeUrl; }, 400);
+            } else {
+              window.location.href = schemeUrl;
+            }
+          }
+        </script>
       </head>
       <body>
         <div class="card">
           <div class="icon-box">🎉</div>
           <h1>Password Reset Complete!</h1>
           <p>Your password has been changed successfully. You can now log into your account using your new password.</p>
-          <a href="tubo://" class="btn">Return to Tubo App</a>
+          <a href="envvault://" class="btn" onclick="openAppHome(event)">Return to Env Vault App</a>
         </div>
       </body>
     </html>
@@ -408,7 +436,7 @@ export function renderAcceptInviteSetupPasswordPage(params: {
       <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Join ${safeTeamName} - Tubo Vault</title>
+        <title>Join ${safeTeamName} - Env Vault</title>
         <style>
           * { box-sizing: border-box; }
           body {
@@ -605,7 +633,7 @@ export function renderInviteSuccessPage(params: {
       <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Welcome to ${safeTeamName}! - Tubo Vault</title>
+        <title>Welcome to ${safeTeamName}! - Env Vault</title>
         <style>
           * { box-sizing: border-box; }
           body {
@@ -696,18 +724,39 @@ export function renderInviteSuccessPage(params: {
         </style>
         <script>
           let seconds = 3;
-          function tryDeepLink() {
-            window.location.href = "tubo://team";
+          function openApp(e) {
+            var isAndroid = /android/i.test(navigator.userAgent);
+            var schemeUrl = "envvault://team";
+            var fallbackScheme = "tubovault://team";
+            var intentUrl = "intent://team#Intent;scheme=envvault;end";
+
+            if (isAndroid) {
+              setTimeout(function() {
+                window.location.href = intentUrl;
+              }, 400);
+            } else {
+              setTimeout(function() {
+                window.location.href = fallbackScheme;
+              }, 500);
+            }
+          }
+          function tryAutoDeepLink() {
+            var isAndroid = /android/i.test(navigator.userAgent);
+            if (isAndroid) {
+              window.location.href = "intent://team#Intent;scheme=envvault;end";
+            } else {
+              window.location.href = "envvault://team";
+            }
           }
           window.onload = function() {
-            tryDeepLink();
+            tryAutoDeepLink();
             const counterEl = document.getElementById('count');
             const timer = setInterval(function() {
               seconds--;
               if (counterEl) counterEl.innerText = seconds;
               if (seconds <= 0) {
                 clearInterval(timer);
-                tryDeepLink();
+                tryAutoDeepLink();
               }
             }, 1000);
           };
@@ -726,8 +775,15 @@ export function renderInviteSuccessPage(params: {
             <div class="team-name">📁 ${safeTeamName}</div>
             <div class="ws-name">🏢 Workspace: ${safeWorkspaceName}</div>
           </div>
-          <a href="tubo://team" class="btn">Open in Tubo Vault App</a>
-          <div class="countdown">Opening Tubo Vault in <span id="count">3</span>s...</div>
+          <a href="envvault://team" class="btn" onclick="openApp(event)">Open in Env Vault App</a>
+          <div class="countdown">Opening Env Vault in <span id="count">3</span>s...</div>
+          <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #27272a;">
+            <p style="font-size: 13px; color: #71717a; margin: 0 0 10px;">App didn't open automatically?</p>
+            <div style="display: flex; justify-content: center; gap: 16px; flex-wrap: wrap;">
+              <a href="tubovault://team" style="color: #06b6d4; font-size: 13px; text-decoration: underline;">Try Tubo Vault link</a>
+              <a href="intent://team#Intent;scheme=envvault;end" style="color: #06b6d4; font-size: 13px; text-decoration: underline;">Android Direct Launch</a>
+            </div>
+          </div>
         </div>
       </body>
     </html>

@@ -416,7 +416,25 @@ export function Header({
         {/* Team Selector Half */}
         <TouchableOpacity
           style={styles.contextCard}
-          onPress={() => setTeamModalOpen(true)}
+          onPress={() => {
+            if (!workspaces || workspaces.length === 0 || !activeWorkspaceId) {
+              showCustomAlert({
+                title: 'Workspace Required',
+                message: 'You need to create a workspace first before you can view or create teams.',
+                type: 'warning',
+                buttons: [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: 'Create Workspace',
+                    style: 'default',
+                    onPress: () => onOpenCreateWorkspace(),
+                  },
+                ],
+              });
+              return;
+            }
+            setTeamModalOpen(true);
+          }}
           activeOpacity={0.75}
         >
           <View style={styles.contextIconBoxTeam}>
@@ -694,6 +712,22 @@ export function Header({
                 style={styles.sheetCreateBtnTeam}
                 onPress={() => {
                   setTeamModalOpen(false);
+                  if (!workspaces || workspaces.length === 0 || !activeWorkspaceId) {
+                    showCustomAlert({
+                      title: 'Workspace Required',
+                      message: 'Teams belong to a workspace. Please create a workspace first before creating a team.',
+                      type: 'warning',
+                      buttons: [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                          text: 'Create Workspace',
+                          style: 'default',
+                          onPress: () => onOpenCreateWorkspace(),
+                        },
+                      ],
+                    });
+                    return;
+                  }
                   onOpenCreateTeam();
                 }}
                 activeOpacity={0.8}
