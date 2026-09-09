@@ -38,6 +38,37 @@ try {
   process.exit(1);
 }
 
+let protoModule = null;
+let cryptoJsModule = null;
+try {
+  protoModule = await import('@tubo/proto');
+  const cjs = await import('crypto-js');
+  cryptoJsModule = cjs.default || cjs;
+} catch {}
+
+function tryDecryptValue(val) {
+  if (!val || typeof val !== 'string' || !cryptoJsModule) return val;
+  const key = process.env.VAULT_ENCRYPTION_KEY || process.env.EXPO_PUBLIC_VAULT_KEY || 'tubo_vault_master_aes_key_2026';
+  if (val.startsWith('enc:pb1:') && protoModule) {
+    try {
+      const b64 = val.slice('enc:pb1:'.length);
+      const bytes = Buffer.from(b64, 'base64');
+      const envelope = protoModule.decodeProto(protoModule.EncryptedEnvEnvelopeType, bytes);
+      const cipher = Buffer.from(envelope.ciphertext).toString('utf8');
+      const decrypted = cryptoJsModule.AES.decrypt(cipher, key).toString(cryptoJsModule.enc.Utf8);
+      return decrypted || val;
+    } catch {}
+  }
+  if (val.startsWith('enc:v1:')) {
+    try {
+      const cipher = val.slice('enc:v1:'.length);
+      const decrypted = cryptoJsModule.AES.decrypt(cipher, key).toString(cryptoJsModule.enc.Utf8);
+      return decrypted || val;
+    } catch {}
+  }
+  return val;
+}
+
 // Colors for terminal formatting
 const c = {
   reset: '\x1b[0m',
@@ -99,6 +130,7 @@ ${c.bold}OPTIONS:${c.reset}
   ${c.green}--json${c.reset}                    Output results in raw JSON format
   ${c.green}--db <path>${c.reset}               Custom path to SQLite database file
   ${c.green}--pull${c.reset}                    Attempt to pull mobile_env_vault.db from connected Android device via ADB
+  ${c.green}--sync, --cloud${c.reset}           Sync latest data from PostgreSQL cloud into local SQLite database
   ${c.green}-h, --help${c.reset}                Show this help message
 
 ${c.bold}EXAMPLES:${c.reset}
@@ -130,6 +162,7 @@ function parseArgs(args) {
     json: false,
     dbPath: null,
     pull: false,
+    syncCloud: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -139,6 +172,8 @@ function parseArgs(args) {
       process.exit(0);
     } else if (arg === '-s' || arg === '--show-secrets' || arg === '--reveal') {
       options.showSecrets = true;
+    } else if (arg === '--sync' || arg === '--cloud') {
+      options.syncCloud = true;
     } else if (arg === '-e' || arg === '--env') {
       options.env = args[++i];
     } else if (arg.startsWith('--env=')) {
@@ -280,6 +315,19 @@ function ensureDatabase(dbPath) {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS sync_queue (
+      id TEXT PRIMARY KEY NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   try {
@@ -291,9 +339,145 @@ function ensureDatabase(dbPath) {
   try {
     db.exec(`ALTER TABLE envs ADD COLUMN created_by_id TEXT;`);
   } catch {}
+  try {
+    db.exec(`ALTER TABLE folders ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced';`);
+  } catch {}
+  try {
+    db.exec(`ALTER TABLE envs ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced';`);
+  } catch {}
 
   return db;
 }
+
+// Sync data directly from PostgreSQL cloud into local SQLite database
+async function syncFromPostgres(db) {
+  try {
+    const cwd = process.cwd();
+    const apiEnvPath = path.resolve(cwd, '../api/.env');
+    let databaseUrl = process.env.DATABASE_URL;
+
+    if (!databaseUrl && fs.existsSync(apiEnvPath)) {
+      const content = fs.readFileSync(apiEnvPath, 'utf8');
+      const match = content.match(/(?:^|\n)\s*DATABASE_URL=([^\r\n]+)/);
+      if (match) databaseUrl = match[1].trim();
+    }
+
+    if (!databaseUrl) return false;
+
+    // Resolve pg module from workspace dependencies
+    const pgCandidates = [
+      path.resolve(cwd, '../../packages/db/node_modules/pg/lib/index.js'),
+      path.resolve(cwd, '../api/node_modules/pg/lib/index.js'),
+      path.resolve(cwd, '../../node_modules/pg/lib/index.js'),
+    ];
+
+    let pgModule = null;
+    for (const p of pgCandidates) {
+      if (fs.existsSync(p)) {
+        const mod = await import(p);
+        pgModule = mod.default || mod;
+        break;
+      }
+    }
+
+    if (!pgModule) return false;
+
+    const pool = new pgModule.Pool({ connectionString: databaseUrl });
+    const [foldersRes, envsRes] = await Promise.all([
+      pool.query('SELECT * FROM folders'),
+      pool.query('SELECT * FROM envs'),
+    ]);
+    await pool.end();
+
+    // 1. Reconcile deletions: remove any local rows in SQLite that were deleted in PostgreSQL
+    const remoteFolderIds = foldersRes.rows.map((r) => r.id);
+    const remoteEnvIds = envsRes.rows.map((r) => r.id);
+
+    if (remoteFolderIds.length > 0) {
+      const placeholders = remoteFolderIds.map(() => '?').join(',');
+      db.prepare(`DELETE FROM folders WHERE id NOT IN (${placeholders})`).run(...remoteFolderIds);
+    } else {
+      db.prepare(`DELETE FROM folders`).run();
+    }
+
+    if (remoteEnvIds.length > 0) {
+      const placeholders = remoteEnvIds.map(() => '?').join(',');
+      db.prepare(`DELETE FROM envs WHERE id NOT IN (${placeholders})`).run(...remoteEnvIds);
+    } else {
+      db.prepare(`DELETE FROM envs`).run();
+    }
+
+    // 2. Upsert folders from PostgreSQL
+    const insertFolder = db.prepare(`
+      INSERT INTO folders (id, workspace_id, team_id, environment, name, description, created_by, created_by_id, created_at, updated_at, sync_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        description = excluded.description,
+        created_by = excluded.created_by,
+        created_by_id = excluded.created_by_id,
+        updated_at = excluded.updated_at,
+        sync_status = 'synced'
+    `);
+
+    for (const f of foldersRes.rows) {
+      insertFolder.run(
+        f.id,
+        f.workspace_id,
+        f.team_id,
+        f.environment,
+        f.name,
+        f.description || null,
+        f.created_by || 'Unknown',
+        f.created_by_id || null,
+        f.created_at ? new Date(f.created_at).toISOString() : new Date().toISOString(),
+        f.updated_at ? new Date(f.updated_at).toISOString() : new Date().toISOString()
+      );
+    }
+
+    // 3. Upsert envs from PostgreSQL
+    const insertEnv = db.prepare(`
+      INSERT INTO envs (id, workspace_id, team_id, environment, folder_id, key, value, is_secret, comment, created_by, created_by_id, created_at, updated_at, sync_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')
+      ON CONFLICT(id) DO UPDATE SET
+        folder_id = excluded.folder_id,
+        key = excluded.key,
+        value = excluded.value,
+        is_secret = excluded.is_secret,
+        comment = excluded.comment,
+        created_by = excluded.created_by,
+        created_by_id = excluded.created_by_id,
+        updated_at = excluded.updated_at,
+        sync_status = 'synced'
+    `);
+
+    for (const e of envsRes.rows) {
+      insertEnv.run(
+        e.id,
+        e.workspace_id,
+        e.team_id,
+        e.environment,
+        e.folder_id || null,
+        e.key,
+        e.value,
+        e.is_secret ? 1 : 0,
+        e.comment || null,
+        e.created_by || 'Unknown',
+        e.created_by_id || null,
+        e.created_at ? new Date(e.created_at).toISOString() : new Date().toISOString(),
+        e.updated_at ? new Date(e.updated_at).toISOString() : new Date().toISOString()
+      );
+    }
+
+    return {
+      foldersCount: foldersRes.rows.length,
+      envsCount: envsRes.rows.length,
+    };
+  } catch (err) {
+    return false;
+  }
+}
+
 
 // Format raw field values for tabular display
 function formatCellValue(rawVal, colKey, isSecret, showSecrets) {
@@ -307,6 +491,9 @@ function formatCellValue(rawVal, colKey, isSecret, showSecrets) {
   }
 
   let text = String(rawVal ?? '');
+  if (colKey === 'value' && isSecretBool && showSecrets) {
+    text = tryDecryptValue(text);
+  }
 
   if (colKey === 'environment') {
     if (text === 'production') return { display: `${c.red}${text}${c.reset}`, raw: text };
@@ -398,12 +585,24 @@ function renderTable(headers, rows, options = {}) {
 }
 
 // Main execution
-function main() {
+async function main() {
   const args = process.argv.slice(2);
   const options = parseArgs(args);
 
   const dbPath = resolveDatabasePath(options.dbPath, options.pull);
   const db = ensureDatabase(dbPath);
+
+  // Reconcile with PostgreSQL cloud (the source of truth) so local SQLite accurately reflects deletions & additions
+  try {
+    const syncRes = await syncFromPostgres(db);
+    if (syncRes) {
+      if (syncRes.foldersCount > 0 || syncRes.envsCount > 0) {
+        console.log(`${c.green}✔ Synchronized with PostgreSQL cloud: ${syncRes.foldersCount} folders, ${syncRes.envsCount} variables.${c.reset}\n`);
+      } else {
+        console.log(`${c.green}✔ Synchronized with PostgreSQL cloud: 0 folders, 0 variables found (reconciled deletions).${c.reset}\n`);
+      }
+    }
+  } catch {}
 
   // Retrieve SQLite metadata
   let stats;
@@ -474,54 +673,121 @@ function main() {
     return;
   }
 
-  // Default: View 'envs' table
-  let sql = 'SELECT id, workspace_id, team_id, environment, key, value, is_secret, comment, created_by, updated_at FROM envs';
-  const conditions = [];
-  const params = [];
+  // Render based on target table
+  const targetTable = options.table || 'envs';
 
-  if (options.env) {
-    conditions.push('environment = ?');
-    params.push(options.env);
-  }
+  if (targetTable === 'envs') {
+    let sql = 'SELECT id, workspace_id, team_id, environment, key, value, is_secret, comment, created_by, updated_at FROM envs';
+    const conditions = [];
+    const params = [];
 
-  if (conditions.length > 0) {
-    sql += ' WHERE ' + conditions.join(' AND ');
-  }
-
-  sql += ' ORDER BY environment ASC, key ASC';
-
-  try {
-    const rows = db.prepare(sql).all(...params);
-
-    console.log(`${c.bold}TABLE:${c.reset} ${c.yellow}envs${c.reset} ${options.env ? `(${c.cyan}filter: ${options.env}${c.reset})` : ''}`);
-    if (!options.showSecrets) {
-      console.log(`${c.gray}💡 Secret values are masked by default. Run with ${c.yellow}--show-secrets${c.gray} or ${c.yellow}-s${c.gray} to reveal.${c.reset}`);
-    } else {
-      console.log(`${c.yellow}⚠ Warning: Showing unmasked secrets!${c.reset}`);
+    if (options.env) {
+      conditions.push('environment = ?');
+      params.push(options.env);
     }
-    console.log('');
 
-    const headers = [
-      { key: 'key', label: 'KEY', maxWidth: 22 },
-      { key: 'value', label: 'VALUE', maxWidth: 36 },
-      { key: 'environment', label: 'ENV', maxWidth: 14 },
-      { key: 'is_secret', label: 'SECRET', maxWidth: 8 },
-      { key: 'workspace_id', label: 'WORKSPACE', maxWidth: 15 },
-      { key: 'team_id', label: 'TEAM', maxWidth: 15 },
-      { key: 'comment', label: 'COMMENT', maxWidth: 32 },
-    ];
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
 
-    renderTable(headers, rows, options);
+    sql += ' ORDER BY environment ASC, key ASC';
 
-    // Summary breakdown
-    const envCounts = db
-      .prepare('SELECT environment, COUNT(*) as count FROM envs GROUP BY environment')
-      .all();
-    const countSummary = envCounts.map(e => `${e.environment}: ${c.bold}${e.count}${c.reset}`).join('  |  ');
+    try {
+      const rows = db.prepare(sql).all(...params);
 
-    console.log(`${c.bold}Total Records:${c.reset} ${c.green}${rows.length}${c.reset}   [ Breakdown: ${countSummary} ]\n`);
-  } catch (err) {
-    console.error(`${c.red}Error querying table 'envs': ${err.message}${c.reset}\n`);
+      console.log(`${c.bold}TABLE:${c.reset} ${c.yellow}envs${c.reset} ${options.env ? `(${c.cyan}filter: ${options.env}${c.reset})` : ''}`);
+      if (!options.showSecrets) {
+        console.log(`${c.gray}💡 Secret values are masked by default. Run with ${c.yellow}--show-secrets${c.gray} or ${c.yellow}-s${c.gray} to reveal.${c.reset}`);
+      } else {
+        console.log(`${c.yellow}⚠ Warning: Showing unmasked secrets!${c.reset}`);
+      }
+      console.log('');
+
+      const headers = [
+        { key: 'key', label: 'KEY', maxWidth: 22 },
+        { key: 'value', label: 'VALUE', maxWidth: 36 },
+        { key: 'environment', label: 'ENV', maxWidth: 14 },
+        { key: 'is_secret', label: 'SECRET', maxWidth: 8 },
+        { key: 'workspace_id', label: 'WORKSPACE', maxWidth: 15 },
+        { key: 'team_id', label: 'TEAM', maxWidth: 15 },
+        { key: 'comment', label: 'COMMENT', maxWidth: 32 },
+      ];
+
+      renderTable(headers, rows, options);
+
+      // Summary breakdown
+      const envCounts = db
+        .prepare('SELECT environment, COUNT(*) as count FROM envs GROUP BY environment')
+        .all();
+      const countSummary = envCounts.map(e => `${e.environment}: ${c.bold}${e.count}${c.reset}`).join('  |  ');
+
+      console.log(`${c.bold}Total Records:${c.reset} ${c.green}${rows.length}${c.reset}   [ Breakdown: ${countSummary} ]\n`);
+    } catch (err) {
+      console.error(`${c.red}Error querying table 'envs': ${err.message}${c.reset}\n`);
+    }
+  } else if (targetTable === 'sync_queue') {
+    let sql = 'SELECT id, entity_type, entity_id, action, status, retry_count, last_error, created_at, updated_at FROM sync_queue ORDER BY created_at ASC';
+    try {
+      const rows = db.prepare(sql).all();
+      console.log(`${c.bold}TABLE:${c.reset} ${c.yellow}sync_queue${c.reset}\n`);
+
+      const headers = [
+        { key: 'id', label: 'ID', maxWidth: 16 },
+        { key: 'entity_type', label: 'TYPE', maxWidth: 10 },
+        { key: 'entity_id', label: 'ENTITY_ID', maxWidth: 16 },
+        { key: 'action', label: 'ACTION', maxWidth: 10 },
+        { key: 'status', label: 'STATUS', maxWidth: 12 },
+        { key: 'retry_count', label: 'RETRIES', maxWidth: 8 },
+        { key: 'last_error', label: 'LAST_ERROR', maxWidth: 24 },
+        { key: 'created_at', label: 'CREATED_AT', maxWidth: 20 },
+      ];
+
+      renderTable(headers, rows, options);
+
+      const statusCounts = db
+        .prepare('SELECT status, COUNT(*) as count FROM sync_queue GROUP BY status')
+        .all();
+      const countSummary = statusCounts.map(s => `${s.status}: ${c.bold}${s.count}${c.reset}`).join('  |  ');
+
+      console.log(`${c.bold}Total Pending/Queued Sync Items:${c.reset} ${c.green}${rows.length}${c.reset}${countSummary ? `   [ Statuses: ${countSummary} ]` : ''}\n`);
+    } catch (err) {
+      console.error(`${c.red}Error querying table 'sync_queue': ${err.message}${c.reset}\n`);
+    }
+  } else if (targetTable === 'folders') {
+    let sql = 'SELECT id, workspace_id, team_id, environment, name, description, created_by, updated_at FROM folders ORDER BY environment ASC, name ASC';
+    try {
+      const rows = db.prepare(sql).all();
+      console.log(`${c.bold}TABLE:${c.reset} ${c.yellow}folders${c.reset}\n`);
+
+      const headers = [
+        { key: 'name', label: 'FOLDER NAME', maxWidth: 22 },
+        { key: 'environment', label: 'ENV', maxWidth: 14 },
+        { key: 'description', label: 'DESCRIPTION', maxWidth: 26 },
+        { key: 'workspace_id', label: 'WORKSPACE', maxWidth: 16 },
+        { key: 'team_id', label: 'TEAM', maxWidth: 16 },
+        { key: 'created_by', label: 'CREATED_BY', maxWidth: 16 },
+      ];
+
+      renderTable(headers, rows, options);
+      console.log(`${c.bold}Total Folders:${c.reset} ${c.green}${rows.length}${c.reset}\n`);
+    } catch (err) {
+      console.error(`${c.red}Error querying table 'folders': ${err.message}${c.reset}\n`);
+    }
+  } else {
+    try {
+      const rows = db.prepare(`SELECT * FROM ${targetTable} LIMIT 100`).all();
+      console.log(`${c.bold}TABLE:${c.reset} ${c.yellow}${targetTable}${c.reset}\n`);
+      if (rows.length === 0) {
+        console.log(`${c.gray}(No records found matching criteria)${c.reset}\n`);
+      } else {
+        const sample = rows[0];
+        const headers = Object.keys(sample).map(k => ({ key: k, label: k.toUpperCase(), maxWidth: 30 }));
+        renderTable(headers, rows, options);
+        console.log(`${c.bold}Total Records:${c.reset} ${c.green}${rows.length}${c.reset}\n`);
+      }
+    } catch (err) {
+      console.error(`${c.red}Error querying table '${targetTable}': ${err.message}${c.reset}\n`);
+    }
   }
 }
 

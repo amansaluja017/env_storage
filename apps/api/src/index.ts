@@ -16,13 +16,19 @@ import {
   renderAcceptInviteSetupPasswordPage,
   renderInviteSuccessPage,
 } from './views/webAuthPages.js';
+import { protoRouter } from './routers/protoRouter.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 
 app.use(cors());
+// Parse Protobuf binary payloads
+app.use(express.raw({ type: ['application/x-protobuf', 'application/octet-stream'], limit: '15mb' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Protobuf Binary API routes
+app.use('/api/proto', protoRouter);
 
 // tRPC Express middleware
 app.use(
@@ -401,6 +407,7 @@ async function startServer() {
 
     app.listen(PORT, () => {
       console.log(`🚀 Env Vault Express + tRPC Server running on http://localhost:${PORT}`);
+      console.log(`⚡ Protobuf Endpoint: http://localhost:${PORT}/api/proto (Binary Wire Transfer)`);
       console.log(`⚡ tRPC Endpoint: http://localhost:${PORT}/trpc (Auth, Workspace, Team, Folder, Env)`);
     });
   } catch (err) {

@@ -1,0 +1,117 @@
+syntax = "proto3";
+
+package tubo.vault;
+
+// 1. Vault Encryption & Decryption Envelope
+message EncryptedEnvEnvelope {
+  int32 version = 1;              // Schema version (e.g. 1)
+  string algorithm = 2;            // "AES-256-CBC"
+  bytes ciphertext = 3;           // The encrypted ciphertext bytes
+  bytes iv = 4;                   // Initialization vector / salt bytes
+  int64 timestamp = 5;            // Timestamp when encrypted (unix ms)
+  string key_id = 6;              // Key identifier
+}
+
+// 2. Data Models
+message EnvItemProto {
+  string id = 1;
+  string workspace_id = 2;
+  string team_id = 3;
+  string environment = 4;
+  string folder_id = 5;
+  string folder_name = 6;
+  string key = 7;
+  string value = 8;
+  bool is_secret = 9;
+  string comment = 10;
+  string created_by = 11;
+  string created_by_id = 12;
+  string created_at = 13;
+  string updated_at = 14;
+}
+
+message FolderItemProto {
+  string id = 1;
+  string workspace_id = 2;
+  string team_id = 3;
+  string environment = 4;
+  string name = 5;
+  string description = 6;
+  string created_by = 7;
+  string created_by_id = 8;
+  string created_at = 9;
+  string updated_at = 10;
+  int32 env_count = 11;
+}
+
+// 3. API Requests & Responses
+message ListEnvsRequestProto {
+  string workspace_id = 1;
+  string team_id = 2;
+  string environment = 3;
+  string folder_id = 4;
+  bool has_folder_filter = 5;
+}
+
+message ListEnvsResponseProto {
+  bool success = 1;
+  string error = 2;
+  repeated EnvItemProto items = 3;
+}
+
+message ListFoldersRequestProto {
+  string workspace_id = 1;
+  string team_id = 2;
+  string environment = 3;
+}
+
+message ListFoldersResponseProto {
+  bool success = 1;
+  string error = 2;
+  repeated FolderItemProto items = 3;
+}
+
+message UpsertEnvRequestProto {
+  string id = 1;
+  string workspace_id = 2;
+  string team_id = 3;
+  string environment = 4;
+  string folder_id = 5;
+  string key = 6;
+  string value = 7;
+  bool is_secret = 8;
+  string comment = 9;
+}
+
+message UpsertEnvResponseProto {
+  bool success = 1;
+  string error = 2;
+  EnvItemProto item = 3;
+}
+
+message FolderActionRequestProto {
+  string id = 1;
+  string workspace_id = 2;
+  string team_id = 3;
+  string environment = 4;
+  string name = 5;
+  string description = 6;
+}
+
+message FolderActionResponseProto {
+  bool success = 1;
+  string error = 2;
+  FolderItemProto item = 3;
+}
+
+message DeleteEntityRequestProto {
+  string id = 1;
+  string team_id = 2;
+  bool delete_envs = 3;
+}
+
+message ApiResponseProto {
+  bool success = 1;
+  string error = 2;
+  string message = 3;
+}

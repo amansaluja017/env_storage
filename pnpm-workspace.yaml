@@ -5,6 +5,7 @@ onlyBuiltDependencies:
   - esbuild
 ignoredBuiltDependencies:
   - better-sqlite3
+  - protobufjs
 neverBuiltDependencies:
   - better-sqlite3
 overrides:
@@ -12,3 +13,5 @@ overrides:
 allowBuilds:
   esbuild: true
   better-sqlite3: false
+  protobufjs: false
+
