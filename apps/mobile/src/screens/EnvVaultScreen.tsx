@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import * as Clipboard from 'expo-clipboard';
 import {
   StyleSheet,
   View,
@@ -11,6 +12,8 @@ import {
   Platform,
   Animated,
   RefreshControl,
+  KeyboardAvoidingView,
+  useWindowDimensions,
 } from 'react-native';
 import { useForm, Controller } from 'react-hook-form';
 import { Ionicons } from '@expo/vector-icons';
@@ -95,6 +98,10 @@ export function EnvVaultScreen({
   user,
   refreshTrigger,
 }: EnvVaultScreenProps) {
+  const { width } = useWindowDimensions();
+  const isCompact = width < 380;
+  const isVeryCompact = width < 340;
+
   const envTabsTargetRef = useTourTarget('tour-env-tabs');
   const searchBarTargetRef = useTourTarget('tour-search-bar');
   const newFolderBtnTargetRef = useTourTarget('tour-new-folder-btn');
@@ -228,6 +235,33 @@ export function EnvVaultScreen({
       folderId: '',
     },
   });
+
+  // Copy state for environment variables
+  const [copiedState, setCopiedState] = useState<{ id: string; type: 'key' | 'value' | 'both' } | null>(null);
+  const copyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleCopy = async (text: string, type: 'key' | 'value' | 'both', id: string) => {
+    try {
+      await Clipboard.setStringAsync(text);
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+      setCopiedState({ id, type });
+      copyTimeoutRef.current = setTimeout(() => {
+        setCopiedState(null);
+      }, 1800);
+    } catch {
+      showCustomAlert({
+        title: 'Copy Failed',
+        message: 'Could not copy to clipboard.',
+        type: 'danger',
+      });
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+    };
+  }, []);
 
   const [dbReady, setDbReady] = useState(false);
 
@@ -734,7 +768,7 @@ export function EnvVaultScreen({
       const targetFolderId = data.folderId || defaultFolder;
 
       // 1. Import to SQLite first (instant local response)
-      await bulkImportMobileEnvs(
+      const { importedCount } = await bulkImportMobileEnvs(
         workspaceId,
         teamId,
         environment,
@@ -742,6 +776,15 @@ export function EnvVaultScreen({
         creatorName,
         targetFolderId
       );
+
+      if (importedCount === 0) {
+        showCustomAlert({
+          title: 'No Variables Found',
+          message: 'No valid key-value pairs were detected. Comments and empty lines were ignored, but no valid entries were found.',
+          type: 'warning',
+        });
+        return;
+      }
 
       setRawModalVisible(false);
       resetRawForm({ rawDotEnv: '', folderId: '' });
@@ -765,6 +808,12 @@ export function EnvVaultScreen({
         },
       });
       mobileSyncManager.triggerSync(apiBaseUrl);
+
+      showCustomAlert({
+        title: 'Import Successful',
+        message: `Successfully imported ${importedCount} environment variable${importedCount === 1 ? '' : 's'}.`,
+        type: 'success',
+      });
     } catch (e: any) {
       showCustomAlert({
         title: 'Import Failed',
@@ -916,6 +965,10 @@ export function EnvVaultScreen({
           {(['development', 'staging', 'production'] as const).map(envName => {
             const isActive = environment === envName;
             const count = envCounts[envName] || 0;
+            const label = isCompact
+              ? (envName === 'development' ? 'DEV' : envName === 'staging' ? 'STAGE' : 'PROD')
+              : envName.toUpperCase();
+
             return (
               <TouchableOpacity
                 key={envName}
@@ -925,8 +978,15 @@ export function EnvVaultScreen({
                   setSelectedFolderId(null);
                 }}
               >
-                <Text style={[styles.envTabText, isActive && styles.envTabTextActive]}>
-                  {envName.toUpperCase()}
+                <Text
+                  style={[
+                    styles.envTabText,
+                    isActive && styles.envTabTextActive,
+                    isVeryCompact && { fontSize: 10.5 },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {label}
                   {count > 0 ? ` (${count})` : ''}
                 </Text>
               </TouchableOpacity>
@@ -1219,76 +1279,79 @@ export function EnvVaultScreen({
         <View style={{ flex: 1 }}>
           {/* Breadcrumb Navigation Trail */}
           <View style={styles.breadcrumbBar}>
-            <TouchableOpacity
-              style={styles.breadcrumbItem}
-              onPress={() => setSelectedFolderId(null)}
-              activeOpacity={0.7}
-              accessibilityLabel="Back to folders"
-            >
-              <Ionicons name="chevron-back" size={14} color={COLORS.primary} style={{ marginRight: 2 }} />
-              <Ionicons name="folder-outline" size={14} color={COLORS.primary} style={{ marginRight: 4 }} />
-              <Text style={styles.breadcrumbLinkText}>Folders</Text>
-            </TouchableOpacity>
+            <View style={styles.breadcrumbLeft}>
+              <TouchableOpacity
+                style={styles.breadcrumbItem}
+                onPress={() => setSelectedFolderId(null)}
+                activeOpacity={0.7}
+                accessibilityLabel="Back to folders"
+              >
+                <Ionicons name="chevron-back" size={14} color={COLORS.primary} style={{ marginRight: 2 }} />
+                <Ionicons name="folder-outline" size={14} color={COLORS.primary} style={{ marginRight: 4 }} />
+                <Text style={styles.breadcrumbLinkText}>Folders</Text>
+              </TouchableOpacity>
 
-            <Ionicons name="chevron-forward" size={12} color={COLORS.textMuted} style={styles.breadcrumbSeparator} />
+              <Ionicons name="chevron-forward" size={12} color={COLORS.textMuted} style={styles.breadcrumbSeparator} />
 
-            <View style={styles.breadcrumbCurrentItem}>
-              <Text style={styles.breadcrumbCurrentIcon}>
-                {selectedFolderId === 'root' ? '📄' : selectedFolderId === 'all' ? '🗄️' : '📁'}
-              </Text>
-              <Text style={styles.breadcrumbCurrentText} numberOfLines={1}>
-                {selectedFolderId === 'root'
-                  ? 'Root / Unfiled'
-                  : selectedFolderId === 'all'
-                  ? 'All Variables'
-                  : activeFolderObj?.name || 'Folder'}
-              </Text>
+              <View style={styles.breadcrumbCurrentItem}>
+                <Text style={styles.breadcrumbCurrentIcon}>
+                  {selectedFolderId === 'root' ? '📄' : selectedFolderId === 'all' ? '🗄️' : '📁'}
+                </Text>
+                <Text style={styles.breadcrumbCurrentText} numberOfLines={1} ellipsizeMode="tail">
+                  {selectedFolderId === 'root'
+                    ? 'Root / Unfiled'
+                    : selectedFolderId === 'all'
+                    ? 'All Variables'
+                    : activeFolderObj?.name || 'Folder'}
+                </Text>
+              </View>
             </View>
 
-            <View style={{ flex: 1 }} />
+            <View style={styles.breadcrumbRight}>
+              <TouchableOpacity
+                style={[
+                  styles.syncStatusBadge,
+                  (syncStatus.isSyncing || isRefreshing) && styles.syncStatusBadgeSyncing,
+                  syncStatus.pendingCount > 0 && !syncStatus.isSyncing && !isRefreshing && styles.syncStatusBadgePending,
+                ]}
+                onPress={handleManualRefresh}
+                activeOpacity={0.7}
+              >
+                {syncStatus.isSyncing || isRefreshing ? (
+                  <>
+                    <ActivityIndicator size="small" color="#3b82f6" style={{ marginRight: 4 }} />
+                    <Text style={[styles.syncStatusText, { color: '#3b82f6' }]}>Syncing...</Text>
+                  </>
+                ) : syncStatus.pendingCount > 0 ? (
+                  <>
+                    <Ionicons name="cloud-upload-outline" size={12} color="#f59e0b" style={{ marginRight: 4 }} />
+                    <Text style={[styles.syncStatusText, { color: '#f59e0b' }]}>{syncStatus.pendingCount}</Text>
+                  </>
+                ) : (
+                  <>
+                    <Ionicons name="cloud-done" size={12} color="#22c55e" style={{ marginRight: 4 }} />
+                    <Text style={[styles.syncStatusText, { color: '#22c55e' }]}>Synced</Text>
+                  </>
+                )}
+              </TouchableOpacity>
 
-            <TouchableOpacity
-              style={[
-                styles.syncStatusBadge,
-                (syncStatus.isSyncing || isRefreshing) && styles.syncStatusBadgeSyncing,
-                syncStatus.pendingCount > 0 && !syncStatus.isSyncing && !isRefreshing && styles.syncStatusBadgePending,
-                { marginRight: 6 },
-              ]}
-              onPress={handleManualRefresh}
-              activeOpacity={0.7}
-            >
-              {syncStatus.isSyncing || isRefreshing ? (
-                <>
-                  <ActivityIndicator size="small" color="#3b82f6" style={{ marginRight: 4 }} />
-                  <Text style={[styles.syncStatusText, { color: '#3b82f6' }]}>Syncing...</Text>
-                </>
-              ) : syncStatus.pendingCount > 0 ? (
-                <>
-                  <Ionicons name="cloud-upload-outline" size={12} color="#f59e0b" style={{ marginRight: 4 }} />
-                  <Text style={[styles.syncStatusText, { color: '#f59e0b' }]}>{syncStatus.pendingCount}</Text>
-                </>
-              ) : (
-                <>
-                  <Ionicons name="cloud-done" size={12} color="#22c55e" style={{ marginRight: 4 }} />
-                  <Text style={[styles.syncStatusText, { color: '#22c55e' }]}>Synced</Text>
-                </>
+              <TouchableOpacity
+                style={styles.manualSyncIconBtn}
+                onPress={handleManualRefresh}
+                activeOpacity={0.7}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityLabel="Sync vault with cloud"
+              >
+                <Animated.View style={{ transform: [{ rotate: spin }] }}>
+                  <Ionicons name="sync-outline" size={14} color={isRefreshing ? COLORS.primary : COLORS.textMuted} />
+                </Animated.View>
+              </TouchableOpacity>
+
+              {!isCompact && width >= 540 && (
+                <View style={styles.breadcrumbEnvBadge}>
+                  <Text style={styles.breadcrumbEnvText}>{environment.toUpperCase()}</Text>
+                </View>
               )}
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.manualSyncIconBtn, { marginRight: 8 }]}
-              onPress={handleManualRefresh}
-              activeOpacity={0.7}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              accessibilityLabel="Sync vault with cloud"
-            >
-              <Animated.View style={{ transform: [{ rotate: spin }] }}>
-                <Ionicons name="sync-outline" size={14} color={isRefreshing ? COLORS.primary : COLORS.textMuted} />
-              </Animated.View>
-            </TouchableOpacity>
-
-            <View style={styles.breadcrumbEnvBadge}>
-              <Text style={styles.breadcrumbEnvText}>{environment.toUpperCase()}</Text>
             </View>
           </View>
 
@@ -1427,12 +1490,28 @@ export function EnvVaultScreen({
               {filteredEnvs.map(item => {
                 const isRevealed = revealedIds[item.id];
                 const displayValue = item.isSecret && !isRevealed ? '••••••••••••••••' : item.value;
+                const isCopiedKey = copiedState?.id === item.id && copiedState?.type === 'key';
+                const isCopiedValue = copiedState?.id === item.id && copiedState?.type === 'value';
+                const isCopiedBoth = copiedState?.id === item.id && copiedState?.type === 'both';
 
                 return (
                   <View key={item.id} style={styles.card}>
                     <View style={styles.cardHeader}>
                       <View style={styles.keyBadgeContainer}>
                         <Text style={styles.keyName}>{item.key}</Text>
+                        <TouchableOpacity
+                          style={styles.keyCopyMiniBtn}
+                          onPress={() => handleCopy(item.key, 'key', item.id)}
+                          activeOpacity={0.6}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          accessibilityLabel="Quick copy key"
+                        >
+                          <Ionicons
+                            name={isCopiedKey ? "checkmark-circle" : "copy-outline"}
+                            size={13}
+                            color={isCopiedKey ? "#22c55e" : COLORS.textMuted}
+                          />
+                        </TouchableOpacity>
                         {item.syncStatus && item.syncStatus !== 'synced' && (
                           <View style={[styles.pendingSyncTag, { marginLeft: 4 }]}>
                             <Ionicons name="time-outline" size={9} color="#f59e0b" style={{ marginRight: 2 }} />
@@ -1482,11 +1561,88 @@ export function EnvVaultScreen({
                       </View>
                     </View>
 
-                    {/* Value Box */}
+                    {/* Value Box with in-box quick copy */}
                     <View style={styles.valueBox}>
-                      <Text style={styles.valueText} numberOfLines={2}>
+                      <Text style={styles.valueText} numberOfLines={2} selectable>
                         {displayValue}
                       </Text>
+                      <TouchableOpacity
+                        style={styles.valueBoxCopyBtn}
+                        onPress={() => handleCopy(item.value, 'value', item.id)}
+                        activeOpacity={0.6}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        accessibilityLabel="Quick copy value"
+                      >
+                        <Ionicons
+                          name={isCopiedValue ? "checkmark-circle" : "copy-outline"}
+                          size={13}
+                          color={isCopiedValue ? "#22c55e" : COLORS.textMuted}
+                        />
+                      </TouchableOpacity>
+                    </View>
+
+                    {/* Dedicated Copy Options: Key & Value both, and separate buttons for Key and Value */}
+                    <View style={styles.copyPillsRow}>
+                      <TouchableOpacity
+                        style={[
+                          styles.copyPill,
+                          styles.copyPillPrimary,
+                          isCopiedBoth && styles.copyPillSuccess,
+                        ]}
+                        onPress={() => handleCopy(`${item.key}=${item.value}`, 'both', item.id)}
+                        activeOpacity={0.7}
+                        accessibilityLabel="Copy KEY=VALUE pair"
+                      >
+                        <Ionicons
+                          name={isCopiedBoth ? "checkmark-circle" : "copy-outline"}
+                          size={12}
+                          color={isCopiedBoth ? "#22c55e" : COLORS.primary}
+                          style={{ marginRight: 4 }}
+                        />
+                        <Text style={[styles.copyPillText, isCopiedBoth && styles.copyPillTextSuccess]}>
+                          {isCopiedBoth ? 'Pair Copied!' : 'Copy Pair (KEY=VAL)'}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.copyPill,
+                          isCopiedKey && styles.copyPillSuccess,
+                        ]}
+                        onPress={() => handleCopy(item.key, 'key', item.id)}
+                        activeOpacity={0.7}
+                        accessibilityLabel="Copy key name"
+                      >
+                        <Ionicons
+                          name={isCopiedKey ? "checkmark-circle" : "copy-outline"}
+                          size={12}
+                          color={isCopiedKey ? "#22c55e" : COLORS.textMuted}
+                          style={{ marginRight: 4 }}
+                        />
+                        <Text style={[styles.copyPillText, isCopiedKey && styles.copyPillTextSuccess]}>
+                          {isCopiedKey ? 'Key Copied!' : 'Copy Key'}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.copyPill,
+                          isCopiedValue && styles.copyPillSuccess,
+                        ]}
+                        onPress={() => handleCopy(item.value, 'value', item.id)}
+                        activeOpacity={0.7}
+                        accessibilityLabel="Copy value"
+                      >
+                        <Ionicons
+                          name={isCopiedValue ? "checkmark-circle" : "copy-outline"}
+                          size={12}
+                          color={isCopiedValue ? "#22c55e" : COLORS.textMuted}
+                          style={{ marginRight: 4 }}
+                        />
+                        <Text style={[styles.copyPillText, isCopiedValue && styles.copyPillTextSuccess]}>
+                          {isCopiedValue ? 'Value Copied!' : 'Copy Value'}
+                        </Text>
+                      </TouchableOpacity>
                     </View>
 
                     {item.comment ? (
@@ -1976,6 +2132,9 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.bg,
     padding: 16,
+    width: '100%',
+    maxWidth: 1080,
+    alignSelf: 'center',
   },
   syncBar: {
     flexDirection: 'row',
@@ -2309,6 +2468,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     marginTop: 10,
     marginBottom: 4,
+    width: '100%',
+    maxWidth: 600,
+    alignSelf: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.4,
@@ -2357,13 +2519,22 @@ const styles = StyleSheet.create({
   breadcrumbBar: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     backgroundColor: COLORS.card,
     borderRadius: 10,
     borderWidth: 1,
     borderColor: COLORS.border,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
     marginBottom: 10,
+    minHeight: 44,
+  },
+  breadcrumbLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    minWidth: 0,
+    marginRight: 8,
   },
   breadcrumbItem: {
     flexDirection: 'row',
@@ -2371,6 +2542,7 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     paddingHorizontal: 4,
     borderRadius: 6,
+    flexShrink: 0,
   },
   breadcrumbLinkText: {
     color: COLORS.primary,
@@ -2378,22 +2550,32 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   breadcrumbSeparator: {
-    marginHorizontal: 4,
+    marginHorizontal: 3,
+    flexShrink: 0,
   },
   breadcrumbCurrentItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    flexShrink: 1,
-    maxWidth: 160,
+    flex: 1,
+    minWidth: 0,
   },
   breadcrumbCurrentIcon: {
     fontSize: 13,
-    marginRight: 5,
+    marginRight: 4,
+    flexShrink: 0,
   },
   breadcrumbCurrentText: {
     color: COLORS.text,
     fontSize: 13,
     fontWeight: '600',
+    flex: 1,
+    minWidth: 0,
+  },
+  breadcrumbRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexShrink: 0,
   },
   breadcrumbEnvBadge: {
     backgroundColor: COLORS.surface,
@@ -2670,15 +2852,63 @@ const styles = StyleSheet.create({
   valueBox: {
     backgroundColor: COLORS.surface,
     borderRadius: 8,
-    padding: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
     borderWidth: 1,
     borderColor: COLORS.border,
     marginBottom: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   valueText: {
     color: COLORS.textSubtle,
     fontSize: 13,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    flex: 1,
+    marginRight: 8,
+  },
+  valueBoxCopyBtn: {
+    padding: 4,
+    borderRadius: 4,
+  },
+  keyCopyMiniBtn: {
+    padding: 3,
+    marginRight: 6,
+  },
+  copyPillsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 2,
+    marginBottom: 8,
+  },
+  copyPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  copyPillPrimary: {
+    backgroundColor: 'rgba(6, 182, 212, 0.08)',
+    borderColor: 'rgba(6, 182, 212, 0.25)',
+  },
+  copyPillSuccess: {
+    backgroundColor: 'rgba(34, 197, 94, 0.12)',
+    borderColor: 'rgba(34, 197, 94, 0.4)',
+  },
+  copyPillText: {
+    color: COLORS.textSubtle,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  copyPillTextSuccess: {
+    color: '#22c55e',
   },
   commentText: {
     color: COLORS.textMuted,
@@ -2704,7 +2934,8 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.85)',
     justifyContent: 'center',
-    padding: 20,
+    alignItems: 'center',
+    padding: 16,
   },
   modalCard: {
     backgroundColor: COLORS.card,
@@ -2713,6 +2944,9 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     padding: 20,
     maxHeight: '90%',
+    width: '100%',
+    maxWidth: 500,
+    alignSelf: 'center',
   },
   modalHeaderRow: {
     flexDirection: 'row',
@@ -2832,6 +3066,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.72)',
     justifyContent: 'flex-end',
+    alignItems: 'center',
   },
   menuSheetCard: {
     backgroundColor: '#0f172a',
@@ -2842,6 +3077,9 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingHorizontal: 18,
     paddingBottom: Platform.OS === 'ios' ? 36 : 24,
+    width: '100%',
+    maxWidth: 540,
+    alignSelf: 'center',
   },
   sheetHandleBar: {
     width: 38,

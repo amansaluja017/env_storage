@@ -17,6 +17,7 @@ import {
   IListFoldersResponseProto,
   IListEnvsRequestProto,
   IListEnvsResponseProto,
+  parseDotEnv,
 } from '@tubo/proto';
 import {
   encryptEnvValue,
@@ -895,39 +896,19 @@ export async function bulkImportMobileEnvs(
   createdBy: string = 'Mobile User',
   folderId?: string | null
 ): Promise<{ importedCount: number }> {
-  const lines = rawDotEnvContent.split('\n');
+  const parsedEntries = parseDotEnv(rawDotEnvContent);
   let importedCount = 0;
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eqIdx = trimmed.indexOf('=');
-    if (eqIdx === -1) continue;
-
-    const key = trimmed.substring(0, eqIdx).trim().toUpperCase();
-    let value = trimmed.substring(eqIdx + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1).replace(/\\([\\n"'])/g, (_, esc) => {
-        if (esc === 'n') return '\n';
-        if (esc === '\\') return '\\';
-        if (esc === '"') return '"';
-        if (esc === "'") return "'";
-        return esc;
-      });
-    }
-
+  for (const entry of parsedEntries) {
     await upsertMobileEnv({
       workspaceId,
       teamId,
       environment,
       folderId,
-      key,
-      value,
+      key: entry.key,
+      value: entry.value,
       isSecret: true,
-      comment: 'Imported in Mobile SQLite',
+      comment: entry.comment || 'Imported in Mobile SQLite',
       createdBy,
     });
     importedCount++;
@@ -935,6 +916,7 @@ export async function bulkImportMobileEnvs(
 
   return { importedCount };
 }
+
 
 /**
  * Reconcile bulk-imported envs after successful API sync.

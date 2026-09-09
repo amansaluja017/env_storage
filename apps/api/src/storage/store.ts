@@ -24,6 +24,7 @@ import {
   decryptEnvValue,
   isEncryptedEnvValue,
 } from '../utils/vaultCrypto.js';
+import { parseDotEnv } from '@tubo/proto';
 
 export interface WorkspaceItem {
   id: string;
@@ -1344,49 +1345,30 @@ export const dataStore = {
     createdBy: string,
     userId?: string,
     userRole?: string
-  ): Promise<{ importedCount: number }> {
-    const lines = rawDotEnv.split('\n');
-    let importedCount = 0;
+  ): Promise<{ importedCount: number; items: EnvItem[] }> {
+    const parsedEntries = parseDotEnv(rawDotEnv);
+    const importedItems: EnvItem[] = [];
 
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const eqIdx = trimmed.indexOf('=');
-      if (eqIdx === -1) continue;
-
-      const key = trimmed.substring(0, eqIdx).trim().toUpperCase();
-      let value = trimmed.substring(eqIdx + 1).trim();
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1).replace(/\\([\\n"'])/g, (_, esc) => {
-          if (esc === 'n') return '\n';
-          if (esc === '\\') return '\\';
-          if (esc === '"') return '"';
-          if (esc === "'") return "'";
-          return esc;
-        });
-      }
-
-      await this.upsertEnv({
+    for (const entry of parsedEntries) {
+      const upserted = await this.upsertEnv({
         workspaceId,
         teamId,
         environment,
         folderId,
-        key,
-        value,
+        key: entry.key,
+        value: entry.value,
         isSecret: true,
-        comment: 'Imported via Monorepo Cloud Sync',
+        comment: entry.comment || 'Imported via Monorepo Cloud Sync',
         createdBy,
         userId,
         userRole,
       });
-      importedCount++;
+      importedItems.push(upserted);
     }
 
-    return { importedCount };
+    return { importedCount: importedItems.length, items: importedItems };
   },
+
 
   async exportEnvsAsZip(params: {
     workspaceId: string;

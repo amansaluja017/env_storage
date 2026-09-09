@@ -352,18 +352,18 @@ export function useAlert() {
   return useContext(AlertContext);
 }
 
-const { width } = Dimensions.get('window');
-
 const styles = StyleSheet.create({
   overlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.82)',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 24,
+    padding: 20,
   },
   dialogCard: {
-    width: Math.min(width - 44, 380),
+    width: '100%',
+    maxWidth: 390,
+    maxHeight: '90%',
     backgroundColor: '#0f1118',
     borderRadius: 24,
     borderWidth: 1.5,

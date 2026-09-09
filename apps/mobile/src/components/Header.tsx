@@ -10,6 +10,7 @@ import {
   TextInput,
   ActivityIndicator,
   Image,
+  useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTourTarget } from 'guideway';
@@ -70,6 +71,10 @@ export function Header({
   isRefreshing = false,
   onStartTour,
 }: HeaderProps) {
+  const { width } = useWindowDimensions();
+  const isCompact = width < 380;
+  const isVeryCompact = width < 340;
+
   const brandTargetRef = useTourTarget('tour-brand');
   const contextTargetRef = useTourTarget('tour-workspaces-teams');
   const tabsTargetRef = useTourTarget('tour-tabs');
@@ -343,24 +348,26 @@ export function Header({
             style={styles.brandLogoImg}
             resizeMode="contain"
           />
-          <Text style={styles.brandText}>ENV VAULT</Text>
-          <View style={styles.statusPill}>
-            <View style={styles.statusDot} />
-            <Text style={styles.statusPillText}>VAULT</Text>
-          </View>
+          <Text style={[styles.brandText, isVeryCompact && { fontSize: 14 }]}>ENV VAULT</Text>
+          {!isCompact && (
+            <View style={styles.statusPill}>
+              <View style={styles.statusDot} />
+              <Text style={styles.statusPillText}>VAULT</Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.actionRow}>
           {/* Start Tour Action Button */}
           <TouchableOpacity
             ref={startTourBtnTargetRef}
-            style={styles.tourBtn}
+            style={[styles.tourBtn, isCompact && { paddingHorizontal: 7 }]}
             onPress={onStartTour}
             activeOpacity={0.75}
             accessibilityLabel="Start tour"
           >
             <Ionicons name="compass" size={15} color={COLORS.primary} />
-            <Text style={styles.tourBtnText}>Tour</Text>
+            {!isCompact && <Text style={styles.tourBtnText}>Tour</Text>}
           </TouchableOpacity>
 
           {/* User Profile Avatar */}
@@ -953,6 +960,9 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
+    width: '100%',
+    maxWidth: 1080,
+    alignSelf: 'center',
   },
   topRow: {
     flexDirection: 'row',
@@ -1186,15 +1196,21 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.75)',
     justifyContent: 'flex-end',
+    alignItems: 'center',
   },
   sheetContainer: {
     backgroundColor: '#121316',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     borderTopWidth: 1,
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
     borderColor: COLORS.border,
     maxHeight: '80%',
     paddingBottom: 24,
+    width: '100%',
+    maxWidth: 580,
+    alignSelf: 'center',
   },
   sheetHandle: {
     width: 40,

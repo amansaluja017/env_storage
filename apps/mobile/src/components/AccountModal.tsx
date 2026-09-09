@@ -562,7 +562,8 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.78)',
     justifyContent: 'center',
-    padding: 20,
+    alignItems: 'center',
+    padding: 16,
   },
   modalCard: {
     backgroundColor: '#121316',
@@ -570,6 +571,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     maxHeight: '85%',
+    width: '100%',
+    maxWidth: 520,
+    alignSelf: 'center',
     overflow: 'hidden',
   },
   headerRow: {
