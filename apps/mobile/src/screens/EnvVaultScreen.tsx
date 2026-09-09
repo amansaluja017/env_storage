@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import * as Clipboard from 'expo-clipboard';
 import {
   StyleSheet,
   View,
@@ -234,6 +235,33 @@ export function EnvVaultScreen({
       folderId: '',
     },
   });
+
+  // Copy state for environment variables
+  const [copiedState, setCopiedState] = useState<{ id: string; type: 'key' | 'value' | 'both' } | null>(null);
+  const copyTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleCopy = async (text: string, type: 'key' | 'value' | 'both', id: string) => {
+    try {
+      await Clipboard.setStringAsync(text);
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+      setCopiedState({ id, type });
+      copyTimeoutRef.current = setTimeout(() => {
+        setCopiedState(null);
+      }, 1800);
+    } catch {
+      showCustomAlert({
+        title: 'Copy Failed',
+        message: 'Could not copy to clipboard.',
+        type: 'danger',
+      });
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+    };
+  }, []);
 
   const [dbReady, setDbReady] = useState(false);
 
@@ -1462,12 +1490,28 @@ export function EnvVaultScreen({
               {filteredEnvs.map(item => {
                 const isRevealed = revealedIds[item.id];
                 const displayValue = item.isSecret && !isRevealed ? '••••••••••••••••' : item.value;
+                const isCopiedKey = copiedState?.id === item.id && copiedState?.type === 'key';
+                const isCopiedValue = copiedState?.id === item.id && copiedState?.type === 'value';
+                const isCopiedBoth = copiedState?.id === item.id && copiedState?.type === 'both';
 
                 return (
                   <View key={item.id} style={styles.card}>
                     <View style={styles.cardHeader}>
                       <View style={styles.keyBadgeContainer}>
                         <Text style={styles.keyName}>{item.key}</Text>
+                        <TouchableOpacity
+                          style={styles.keyCopyMiniBtn}
+                          onPress={() => handleCopy(item.key, 'key', item.id)}
+                          activeOpacity={0.6}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          accessibilityLabel="Quick copy key"
+                        >
+                          <Ionicons
+                            name={isCopiedKey ? "checkmark-circle" : "copy-outline"}
+                            size={13}
+                            color={isCopiedKey ? "#22c55e" : COLORS.textMuted}
+                          />
+                        </TouchableOpacity>
                         {item.syncStatus && item.syncStatus !== 'synced' && (
                           <View style={[styles.pendingSyncTag, { marginLeft: 4 }]}>
                             <Ionicons name="time-outline" size={9} color="#f59e0b" style={{ marginRight: 2 }} />
@@ -1517,11 +1561,88 @@ export function EnvVaultScreen({
                       </View>
                     </View>
 
-                    {/* Value Box */}
+                    {/* Value Box with in-box quick copy */}
                     <View style={styles.valueBox}>
-                      <Text style={styles.valueText} numberOfLines={2}>
+                      <Text style={styles.valueText} numberOfLines={2} selectable>
                         {displayValue}
                       </Text>
+                      <TouchableOpacity
+                        style={styles.valueBoxCopyBtn}
+                        onPress={() => handleCopy(item.value, 'value', item.id)}
+                        activeOpacity={0.6}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        accessibilityLabel="Quick copy value"
+                      >
+                        <Ionicons
+                          name={isCopiedValue ? "checkmark-circle" : "copy-outline"}
+                          size={13}
+                          color={isCopiedValue ? "#22c55e" : COLORS.textMuted}
+                        />
+                      </TouchableOpacity>
+                    </View>
+
+                    {/* Dedicated Copy Options: Key & Value both, and separate buttons for Key and Value */}
+                    <View style={styles.copyPillsRow}>
+                      <TouchableOpacity
+                        style={[
+                          styles.copyPill,
+                          styles.copyPillPrimary,
+                          isCopiedBoth && styles.copyPillSuccess,
+                        ]}
+                        onPress={() => handleCopy(`${item.key}=${item.value}`, 'both', item.id)}
+                        activeOpacity={0.7}
+                        accessibilityLabel="Copy KEY=VALUE pair"
+                      >
+                        <Ionicons
+                          name={isCopiedBoth ? "checkmark-circle" : "copy-outline"}
+                          size={12}
+                          color={isCopiedBoth ? "#22c55e" : COLORS.primary}
+                          style={{ marginRight: 4 }}
+                        />
+                        <Text style={[styles.copyPillText, isCopiedBoth && styles.copyPillTextSuccess]}>
+                          {isCopiedBoth ? 'Pair Copied!' : 'Copy Pair (KEY=VAL)'}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.copyPill,
+                          isCopiedKey && styles.copyPillSuccess,
+                        ]}
+                        onPress={() => handleCopy(item.key, 'key', item.id)}
+                        activeOpacity={0.7}
+                        accessibilityLabel="Copy key name"
+                      >
+                        <Ionicons
+                          name={isCopiedKey ? "checkmark-circle" : "copy-outline"}
+                          size={12}
+                          color={isCopiedKey ? "#22c55e" : COLORS.textMuted}
+                          style={{ marginRight: 4 }}
+                        />
+                        <Text style={[styles.copyPillText, isCopiedKey && styles.copyPillTextSuccess]}>
+                          {isCopiedKey ? 'Key Copied!' : 'Copy Key'}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.copyPill,
+                          isCopiedValue && styles.copyPillSuccess,
+                        ]}
+                        onPress={() => handleCopy(item.value, 'value', item.id)}
+                        activeOpacity={0.7}
+                        accessibilityLabel="Copy value"
+                      >
+                        <Ionicons
+                          name={isCopiedValue ? "checkmark-circle" : "copy-outline"}
+                          size={12}
+                          color={isCopiedValue ? "#22c55e" : COLORS.textMuted}
+                          style={{ marginRight: 4 }}
+                        />
+                        <Text style={[styles.copyPillText, isCopiedValue && styles.copyPillTextSuccess]}>
+                          {isCopiedValue ? 'Value Copied!' : 'Copy Value'}
+                        </Text>
+                      </TouchableOpacity>
                     </View>
 
                     {item.comment ? (
@@ -2731,15 +2852,63 @@ const styles = StyleSheet.create({
   valueBox: {
     backgroundColor: COLORS.surface,
     borderRadius: 8,
-    padding: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
     borderWidth: 1,
     borderColor: COLORS.border,
     marginBottom: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   valueText: {
     color: COLORS.textSubtle,
     fontSize: 13,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    flex: 1,
+    marginRight: 8,
+  },
+  valueBoxCopyBtn: {
+    padding: 4,
+    borderRadius: 4,
+  },
+  keyCopyMiniBtn: {
+    padding: 3,
+    marginRight: 6,
+  },
+  copyPillsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 2,
+    marginBottom: 8,
+  },
+  copyPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  copyPillPrimary: {
+    backgroundColor: 'rgba(6, 182, 212, 0.08)',
+    borderColor: 'rgba(6, 182, 212, 0.25)',
+  },
+  copyPillSuccess: {
+    backgroundColor: 'rgba(34, 197, 94, 0.12)',
+    borderColor: 'rgba(34, 197, 94, 0.4)',
+  },
+  copyPillText: {
+    color: COLORS.textSubtle,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  copyPillTextSuccess: {
+    color: '#22c55e',
   },
   commentText: {
     color: COLORS.textMuted,
