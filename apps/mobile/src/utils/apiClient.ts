@@ -4,6 +4,7 @@ import {
   updateAccessToken,
   clearAuthSession,
 } from '../storage/secureStorage';
+import { encodeProto, decodeProto } from '@tubo/proto';
 
 let activeAccessToken: string | null = null;
 let activeRefreshToken: string | null = null;
@@ -248,6 +249,31 @@ export async function apiPut<T = any>(url: string, data?: any, config?: AxiosReq
 export async function apiDelete<T = any>(url: string, config?: AxiosRequestConfig): Promise<T> {
   const response = await apiClient.delete<T>(url, config);
   return response.data;
+}
+
+/**
+ * Perform a binary Protocol Buffers API request over the internet
+ */
+export async function protoRequest<TReq, TRes>(
+  url: string,
+  reqPayload: TReq,
+  reqType: any,
+  resType: any,
+  config?: AxiosRequestConfig
+): Promise<TRes> {
+  const encodedBytes = encodeProto(reqType, reqPayload);
+
+  const response = await apiClient.post(url, encodedBytes, {
+    ...config,
+    headers: {
+      ...config?.headers,
+      'Content-Type': 'application/x-protobuf',
+      Accept: 'application/x-protobuf',
+    },
+    responseType: 'arraybuffer',
+  });
+
+  return decodeProto<TRes>(resType, response.data);
 }
 
 /**

@@ -124,6 +124,12 @@ export const envRouter = router({
             message: err.message,
           });
         }
+        if (err.message?.toLowerCase().includes('not found')) {
+          throw new TRPCError({
+            code: 'NOT_FOUND',
+            message: err.message,
+          });
+        }
         throw new TRPCError({
           code: 'BAD_REQUEST',
           message: err.message || 'Failed to delete environment variable',

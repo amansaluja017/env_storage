@@ -1,6 +1,20 @@
 import { AppState, AppStateStatus } from 'react-native';
 import { useState, useEffect } from 'react';
-import { apiClient } from '../utils/apiClient';
+import { apiClient, protoRequest } from '../utils/apiClient';
+import {
+  FolderActionRequestProtoType,
+  FolderActionResponseProtoType,
+  DeleteEntityRequestProtoType,
+  UpsertEnvRequestProtoType,
+  UpsertEnvResponseProtoType,
+  ApiResponseProtoType,
+  IFolderActionRequestProto,
+  IFolderActionResponseProto,
+  IDeleteEntityRequestProto,
+  IUpsertEnvRequestProto,
+  IUpsertEnvResponseProto,
+  IApiResponseProto,
+} from '@tubo/proto';
 import {
   getPendingSyncQueue,
   updateSyncItemStatus,
@@ -9,6 +23,9 @@ import {
   getPendingSyncCount,
   syncEnvsFromRemote,
   reconcileBulkImportedEnvs,
+  hydrateVaultFromRemote,
+  deleteMobileFolder,
+  deleteMobileEnv,
   SyncQueueItem,
 } from './mobileSqlite';
 
@@ -83,6 +100,46 @@ class MobileSyncManager {
       return this.pendingCount;
     } catch {
       return this.pendingCount;
+    }
+  }
+
+  /**
+   * Bi-directional synchronization:
+   * 1. Pushes any pending offline mutations from SQLite to PostgreSQL first
+   * 2. Pulls and reconciles all folders & environment variables from PostgreSQL into SQLite
+   * Makes PostgreSQL the authoritative source of truth.
+   */
+  public async syncVaultFromRemote(
+    workspaceId: string,
+    teamId: string,
+    environment: 'development' | 'staging' | 'production',
+    apiBaseUrl?: string
+  ): Promise<{ foldersCount: number; envsCount: number }> {
+    const baseUrl = apiBaseUrl || this.activeBaseUrl || (process.env.EXPO_PUBLIC_API_URL || '').replace(/\/+$/, '');
+    if (!baseUrl || !workspaceId || !teamId) {
+      return { foldersCount: 0, envsCount: 0 };
+    }
+
+    this.isSyncing = true;
+    this.lastError = null;
+    this.notify();
+
+    try {
+      // 1. Drain pending changes first to prevent clobbering offline edits
+      await this.triggerSync(baseUrl);
+
+      // 2. Hydrate from remote PostgreSQL into SQLite
+      const result = await hydrateVaultFromRemote(workspaceId, teamId, environment, baseUrl);
+      this.lastSyncTime = new Date();
+      return result;
+    } catch (err: any) {
+      console.warn('[MobileSyncManager] Vault sync error:', err?.message || err);
+      this.lastError = err?.message || 'Sync failed';
+      throw err;
+    } finally {
+      this.isSyncing = false;
+      this.pendingCount = await getPendingSyncCount();
+      this.notify();
     }
   }
 
@@ -173,26 +230,56 @@ class MobileSyncManager {
     try {
       switch (`${item.entityType}:${item.action}`) {
         case 'folder:create': {
-          await apiClient.post(`${baseUrl}/trpc/folder.create`, {
-            id: item.entityId,
-            workspaceId: payload.workspaceId,
-            teamId: payload.teamId,
-            environment: payload.environment,
-            name: payload.name,
-            description: payload.description || undefined,
-          });
+          try {
+            await protoRequest<IFolderActionRequestProto, IFolderActionResponseProto>(
+              `${baseUrl}/api/proto/folder.create`,
+              {
+                id: item.entityId,
+                workspaceId: payload.workspaceId,
+                teamId: payload.teamId,
+                environment: payload.environment,
+                name: payload.name,
+                description: payload.description || undefined,
+              },
+              FolderActionRequestProtoType,
+              FolderActionResponseProtoType
+            );
+          } catch {
+            await apiClient.post(`${baseUrl}/trpc/folder.create`, {
+              id: item.entityId,
+              workspaceId: payload.workspaceId,
+              teamId: payload.teamId,
+              environment: payload.environment,
+              name: payload.name,
+              description: payload.description || undefined,
+            });
+          }
           await markEntitySynced('folder', item.entityId);
           await removeSyncItem(item.id);
           return true;
         }
 
         case 'folder:update': {
-          await apiClient.post(`${baseUrl}/trpc/folder.update`, {
-            folderId: item.entityId,
-            teamId: payload.teamId,
-            name: payload.name,
-            description: payload.description || undefined,
-          });
+          try {
+            await protoRequest<IFolderActionRequestProto, IFolderActionResponseProto>(
+              `${baseUrl}/api/proto/folder.update`,
+              {
+                id: item.entityId,
+                teamId: payload.teamId,
+                name: payload.name,
+                description: payload.description || undefined,
+              },
+              FolderActionRequestProtoType,
+              FolderActionResponseProtoType
+            );
+          } catch {
+            await apiClient.post(`${baseUrl}/trpc/folder.update`, {
+              folderId: item.entityId,
+              teamId: payload.teamId,
+              name: payload.name,
+              description: payload.description || undefined,
+            });
+          }
           await markEntitySynced('folder', item.entityId);
           await removeSyncItem(item.id);
           return true;
@@ -200,34 +287,70 @@ class MobileSyncManager {
 
         case 'folder:delete': {
           try {
-            await apiClient.post(`${baseUrl}/trpc/folder.delete`, {
-              folderId: item.entityId,
-              teamId: payload.teamId,
-              deleteEnvs: payload.deleteEnvs ?? false,
-            });
-          } catch (err: any) {
-            // If already deleted or not found (404), consider it completed
-            if (err?.response?.status !== 404) {
-              throw err;
+            await protoRequest<IDeleteEntityRequestProto, IApiResponseProto>(
+              `${baseUrl}/api/proto/folder.delete`,
+              {
+                id: item.entityId,
+                teamId: payload.teamId,
+                deleteEnvs: payload.deleteEnvs ?? false,
+              },
+              DeleteEntityRequestProtoType,
+              ApiResponseProtoType
+            );
+          } catch (protoErr: any) {
+            try {
+              await apiClient.post(`${baseUrl}/trpc/folder.delete`, {
+                folderId: item.entityId,
+                teamId: payload.teamId,
+                deleteEnvs: payload.deleteEnvs ?? false,
+              });
+            } catch (err: any) {
+              const status = err?.response?.status;
+              const errMsg = (err?.response?.data?.error?.message || err?.message || '').toLowerCase();
+              if (status === 404 || errMsg.includes('not found') || errMsg.includes('does not exist')) {
+                // Resource is already gone on server, proceed to remove from queue
+              } else {
+                throw err;
+              }
             }
           }
           await removeSyncItem(item.id);
+          await deleteMobileFolder(item.entityId, payload.deleteEnvs ?? false);
           return true;
         }
 
         case 'env:create':
         case 'env:update': {
-          await apiClient.post(`${baseUrl}/trpc/env.upsert`, {
-            id: item.entityId,
-            workspaceId: payload.workspaceId,
-            teamId: payload.teamId,
-            environment: payload.environment,
-            folderId: payload.folderId || null,
-            key: payload.key,
-            value: payload.value,
-            isSecret: payload.isSecret ?? true,
-            comment: payload.comment || undefined,
-          });
+          try {
+            await protoRequest<IUpsertEnvRequestProto, IUpsertEnvResponseProto>(
+              `${baseUrl}/api/proto/env.upsert`,
+              {
+                id: item.entityId,
+                workspaceId: payload.workspaceId,
+                teamId: payload.teamId,
+                environment: payload.environment,
+                folderId: payload.folderId || null,
+                key: payload.key,
+                value: payload.value,
+                isSecret: payload.isSecret ?? true,
+                comment: payload.comment || undefined,
+              },
+              UpsertEnvRequestProtoType,
+              UpsertEnvResponseProtoType
+            );
+          } catch {
+            await apiClient.post(`${baseUrl}/trpc/env.upsert`, {
+              id: item.entityId,
+              workspaceId: payload.workspaceId,
+              teamId: payload.teamId,
+              environment: payload.environment,
+              folderId: payload.folderId || null,
+              key: payload.key,
+              value: payload.value,
+              isSecret: payload.isSecret ?? true,
+              comment: payload.comment || undefined,
+            });
+          }
           await markEntitySynced('env', item.entityId);
           await removeSyncItem(item.id);
           return true;
@@ -235,17 +358,33 @@ class MobileSyncManager {
 
         case 'env:delete': {
           try {
-            await apiClient.post(`${baseUrl}/trpc/env.delete`, {
-              id: item.entityId,
-              teamId: payload.teamId,
-            });
-          } catch (err: any) {
-            // If already deleted or not found (404), consider it completed
-            if (err?.response?.status !== 404) {
-              throw err;
+            await protoRequest<IDeleteEntityRequestProto, IApiResponseProto>(
+              `${baseUrl}/api/proto/env.delete`,
+              {
+                id: item.entityId,
+                teamId: payload.teamId,
+              },
+              DeleteEntityRequestProtoType,
+              ApiResponseProtoType
+            );
+          } catch (protoErr: any) {
+            try {
+              await apiClient.post(`${baseUrl}/trpc/env.delete`, {
+                id: item.entityId,
+                teamId: payload.teamId,
+              });
+            } catch (err: any) {
+              const status = err?.response?.status;
+              const errMsg = (err?.response?.data?.error?.message || err?.message || '').toLowerCase();
+              if (status === 404 || errMsg.includes('not found') || errMsg.includes('does not exist')) {
+                // Resource is already gone on server, proceed to remove from queue
+              } else {
+                throw err;
+              }
             }
           }
           await removeSyncItem(item.id);
+          await deleteMobileEnv(item.entityId);
           return true;
         }
 

@@ -27,14 +27,22 @@ import {
   updateMobileFolder,
   deleteMobileFolder,
   getMobileVaultStats,
+  getMobileEnvironmentsSummary,
   syncFoldersFromRemote,
   syncEnvsFromRemote,
+  hydrateVaultFromRemote,
   enqueueSyncItem,
   EnvItem,
   FolderItem,
 } from '../storage/mobileSqlite';
 import { mobileSyncManager, useMobileSyncStatus } from '../storage/mobileSyncManager';
-import { apiClient } from '../utils/apiClient';
+import { apiClient, protoRequest } from '../utils/apiClient';
+import {
+  ListEnvsRequestProtoType,
+  ListEnvsResponseProtoType,
+  IListEnvsRequestProto,
+  IListEnvsResponseProto,
+} from '@tubo/proto';
 import { ExportEnvsModal } from '../components/ExportEnvsModal';
 import { showCustomAlert } from '../components/CustomAlert';
 import { FoldersListSkeleton, EnvsListSkeleton } from '../components/Skeleton';
@@ -109,9 +117,15 @@ export function EnvVaultScreen({
   const [folderMenuTarget, setFolderMenuTarget] = useState<FolderMenuTarget | null>(null);
   const [loading, setLoading] = useState(false);
   const [foldersLoading, setFoldersLoading] = useState(false);
+  const [isHydratingFromCloud, setIsHydratingFromCloud] = useState(false);
   const [search, setSearch] = useState('');
   const [folderSearch, setFolderSearch] = useState('');
   const [revealedIds, setRevealedIds] = useState<Record<string, boolean>>({});
+  const [envCounts, setEnvCounts] = useState<{ development: number; staging: number; production: number }>({
+    development: 0,
+    staging: 0,
+    production: 0,
+  });
 
   // Section Refresh animation & handler
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -128,12 +142,29 @@ export function EnvVaultScreen({
     }).start();
 
     try {
-      // Drain pending mutations first before refreshing view
-      await mobileSyncManager.triggerSync(apiBaseUrl);
+      // Perform full bi-directional sync (push pending offline mutations, pull latest PostgreSQL data into SQLite)
+      const res = await mobileSyncManager.syncVaultFromRemote(workspaceId, teamId, environment, apiBaseUrl);
       if (selectedFolderId !== null) {
-        await fetchEnvs(true);
+        await fetchEnvs(false);
       } else {
-        await fetchFolders(true);
+        const [updatedFList, updatedStats] = await Promise.all([
+          getMobileFolders(workspaceId, teamId, environment),
+          getMobileVaultStats(workspaceId, teamId, environment),
+        ]);
+        setFoldersList(updatedFList);
+        setVaultStats(updatedStats);
+      }
+      showCustomAlert({
+        title: 'Vault Synced',
+        message: `Synced with cloud successfully (${res.foldersCount} folders, ${res.envsCount} variables).`,
+        type: 'success',
+      });
+    } catch (e: any) {
+      console.log('Manual refresh note:', e);
+      if (selectedFolderId !== null) {
+        await fetchEnvs(false);
+      } else {
+        await fetchFolders(false);
       }
     } finally {
       setTimeout(() => setIsRefreshing(false), 300);
@@ -262,47 +293,56 @@ export function EnvVaultScreen({
     setFoldersLoading(true);
     try {
       // 1. Read SQLite first (instant local response)
-      const [fList, stats] = await Promise.all([
+      const [fList, stats, envSummary] = await Promise.all([
         getMobileFolders(workspaceId, teamId, environment),
         getMobileVaultStats(workspaceId, teamId, environment),
+        getMobileEnvironmentsSummary(workspaceId, teamId),
       ]);
       setFoldersList(fList);
       setVaultStats(stats);
+      setEnvCounts(envSummary);
 
-      // 2. Background sync: fetch remote folders from PostgreSQL & reconcile into SQLite
-      const syncPromise = apiClient
-        .get(`${apiBaseUrl}/trpc/folder.list`, {
-          params: {
-            input: JSON.stringify({
-              workspaceId,
-              teamId,
-              environment,
-            }),
-          },
-        })
-        .then(async (res) => {
-          const remoteFolders = res.data?.result?.data;
-          if (Array.isArray(remoteFolders)) {
-            await syncFoldersFromRemote(workspaceId, teamId, environment, remoteFolders);
-            const [updatedFList, updatedStats] = await Promise.all([
-              getMobileFolders(workspaceId, teamId, environment),
-              getMobileVaultStats(workspaceId, teamId, environment),
-            ]);
-            setFoldersList(updatedFList);
-            setVaultStats(updatedStats);
+      const isLocalEmpty = fList.length === 0 && stats.totalEnvs === 0;
+      if (isLocalEmpty) {
+        setIsHydratingFromCloud(true);
+      }
+
+      // 2. Background sync: fetch remote folders AND all remote envs from PostgreSQL & reconcile into SQLite
+      const syncPromise = hydrateVaultFromRemote(workspaceId, teamId, environment, apiBaseUrl)
+        .then(async () => {
+          const [updatedFList, updatedStats, updatedEnvSummary] = await Promise.all([
+            getMobileFolders(workspaceId, teamId, environment),
+            getMobileVaultStats(workspaceId, teamId, environment),
+            getMobileEnvironmentsSummary(workspaceId, teamId),
+          ]);
+          setFoldersList(updatedFList);
+          setVaultStats(updatedStats);
+          setEnvCounts(updatedEnvSummary);
+
+          // If current environment has no data but another does (e.g. production), switch smoothly
+          if (environment === 'development' && updatedFList.length === 0 && updatedStats.totalEnvs === 0) {
+            if (updatedEnvSummary.production > 0) {
+              setEnvironment('production');
+            } else if (updatedEnvSummary.staging > 0) {
+              setEnvironment('staging');
+            }
           }
         })
         .catch((err) => {
-          console.log('Background folder sync note:', err?.message || err);
+          console.log('Background vault sync note:', err?.message || err);
+        })
+        .finally(() => {
+          setIsHydratingFromCloud(false);
         });
 
-      if (awaitRemote) {
+      if (awaitRemote || isLocalEmpty) {
         await syncPromise;
       }
     } catch (e) {
       console.log('Error reading Mobile SQLite folders:', e);
     } finally {
       setFoldersLoading(false);
+      setIsHydratingFromCloud(false);
     }
   };
 
@@ -329,19 +369,35 @@ export function EnvVaultScreen({
           ? null
           : selectedFolderId;
 
-      const syncPromise = apiClient
-        .get(`${apiBaseUrl}/trpc/env.list`, {
-          params: {
-            input: JSON.stringify({
-              workspaceId,
-              teamId,
-              environment,
-              folderId: queryFolderId,
-            }),
-          },
+      const cleanBase = apiBaseUrl.replace(/\/+$/, '');
+      const syncPromise = protoRequest<IListEnvsRequestProto, IListEnvsResponseProto>(
+        `${cleanBase}/api/proto/env.list`,
+        {
+          workspaceId,
+          teamId,
+          environment,
+          folderId: queryFolderId || undefined,
+          hasFolderFilter: queryFolderId !== undefined,
+        },
+        ListEnvsRequestProtoType,
+        ListEnvsResponseProtoType
+      )
+        .catch(async (protoErr) => {
+          console.log('Background proto env sync fallback:', protoErr?.message);
+          const res = await apiClient.get(`${cleanBase}/trpc/env.list`, {
+            params: {
+              input: JSON.stringify({
+                workspaceId,
+                teamId,
+                environment,
+                folderId: queryFolderId,
+              }),
+            },
+          });
+          return { success: true, items: res.data?.result?.data || [] };
         })
-        .then(async (res) => {
-          const remoteEnvs = res.data?.result?.data;
+        .then(async (protoRes) => {
+          const remoteEnvs = protoRes.items;
           if (Array.isArray(remoteEnvs)) {
             await syncEnvsFromRemote(workspaceId, teamId, environment, remoteEnvs, queryFolderId);
             const updated = await getMobileEnvs(
@@ -803,32 +859,54 @@ export function EnvVaultScreen({
             <Text style={styles.vaultSecurityText}>Encrypted Vault</Text>
           </View>
 
-          <TouchableOpacity
-            style={[
-              styles.syncStatusBadge,
-              syncStatus.isSyncing && styles.syncStatusBadgeSyncing,
-              syncStatus.pendingCount > 0 && !syncStatus.isSyncing && styles.syncStatusBadgePending,
-            ]}
-            onPress={() => mobileSyncManager.triggerSync(apiBaseUrl)}
-            activeOpacity={0.7}
-          >
-            {syncStatus.isSyncing ? (
-              <>
-                <ActivityIndicator size="small" color="#3b82f6" style={{ marginRight: 4 }} />
-                <Text style={[styles.syncStatusText, { color: '#3b82f6' }]}>Syncing...</Text>
-              </>
-            ) : syncStatus.pendingCount > 0 ? (
-              <>
-                <Ionicons name="cloud-upload-outline" size={12} color="#f59e0b" style={{ marginRight: 4 }} />
-                <Text style={[styles.syncStatusText, { color: '#f59e0b' }]}>{syncStatus.pendingCount} pending</Text>
-              </>
-            ) : (
-              <>
-                <Ionicons name="cloud-done" size={12} color="#22c55e" style={{ marginRight: 4 }} />
-                <Text style={[styles.syncStatusText, { color: '#22c55e' }]}>Synced</Text>
-              </>
-            )}
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <TouchableOpacity
+              style={[
+                styles.syncStatusBadge,
+                (syncStatus.isSyncing || isRefreshing) && styles.syncStatusBadgeSyncing,
+                syncStatus.pendingCount > 0 && !syncStatus.isSyncing && !isRefreshing && styles.syncStatusBadgePending,
+              ]}
+              onPress={handleManualRefresh}
+              activeOpacity={0.7}
+            >
+              {syncStatus.isSyncing || isRefreshing ? (
+                <>
+                  <ActivityIndicator size="small" color="#3b82f6" style={{ marginRight: 4 }} />
+                  <Text style={[styles.syncStatusText, { color: '#3b82f6' }]}>Syncing...</Text>
+                </>
+              ) : syncStatus.pendingCount > 0 ? (
+                <>
+                  <Ionicons name="cloud-upload-outline" size={12} color="#f59e0b" style={{ marginRight: 4 }} />
+                  <Text style={[styles.syncStatusText, { color: '#f59e0b' }]}>{syncStatus.pendingCount} pending</Text>
+                </>
+              ) : (
+                <>
+                  <Ionicons name="cloud-done" size={12} color="#22c55e" style={{ marginRight: 4 }} />
+                  <Text style={[styles.syncStatusText, { color: '#22c55e' }]}>Synced</Text>
+                </>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.manualSyncIconBtn}
+              onPress={handleManualRefresh}
+              activeOpacity={0.7}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityLabel="Sync vault with cloud"
+            >
+              <Animated.View style={{ transform: [{ rotate: spin }] }}>
+                <Ionicons name="sync-outline" size={15} color={isRefreshing ? COLORS.primary : COLORS.textMuted} />
+              </Animated.View>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* Cloud Hydration Restoring Banner */}
+      {isHydratingFromCloud && selectedFolderId === null && (
+        <View style={styles.cloudRestoringBanner}>
+          <ActivityIndicator size="small" color="#60a5fa" style={{ marginRight: 8 }} />
+          <Text style={styles.cloudRestoringText}>Restoring vault from cloud...</Text>
         </View>
       )}
 
@@ -837,6 +915,7 @@ export function EnvVaultScreen({
         <View ref={envTabsTargetRef} style={styles.envTabsRow}>
           {(['development', 'staging', 'production'] as const).map(envName => {
             const isActive = environment === envName;
+            const count = envCounts[envName] || 0;
             return (
               <TouchableOpacity
                 key={envName}
@@ -848,6 +927,7 @@ export function EnvVaultScreen({
               >
                 <Text style={[styles.envTabText, isActive && styles.envTabTextActive]}>
                   {envName.toUpperCase()}
+                  {count > 0 ? ` (${count})` : ''}
                 </Text>
               </TouchableOpacity>
             );
@@ -1170,14 +1250,14 @@ export function EnvVaultScreen({
             <TouchableOpacity
               style={[
                 styles.syncStatusBadge,
-                syncStatus.isSyncing && styles.syncStatusBadgeSyncing,
-                syncStatus.pendingCount > 0 && !syncStatus.isSyncing && styles.syncStatusBadgePending,
-                { marginRight: 8 },
+                (syncStatus.isSyncing || isRefreshing) && styles.syncStatusBadgeSyncing,
+                syncStatus.pendingCount > 0 && !syncStatus.isSyncing && !isRefreshing && styles.syncStatusBadgePending,
+                { marginRight: 6 },
               ]}
-              onPress={() => mobileSyncManager.triggerSync(apiBaseUrl)}
+              onPress={handleManualRefresh}
               activeOpacity={0.7}
             >
-              {syncStatus.isSyncing ? (
+              {syncStatus.isSyncing || isRefreshing ? (
                 <>
                   <ActivityIndicator size="small" color="#3b82f6" style={{ marginRight: 4 }} />
                   <Text style={[styles.syncStatusText, { color: '#3b82f6' }]}>Syncing...</Text>
@@ -1193,6 +1273,18 @@ export function EnvVaultScreen({
                   <Text style={[styles.syncStatusText, { color: '#22c55e' }]}>Synced</Text>
                 </>
               )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.manualSyncIconBtn, { marginRight: 8 }]}
+              onPress={handleManualRefresh}
+              activeOpacity={0.7}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              accessibilityLabel="Sync vault with cloud"
+            >
+              <Animated.View style={{ transform: [{ rotate: spin }] }}>
+                <Ionicons name="sync-outline" size={14} color={isRefreshing ? COLORS.primary : COLORS.textMuted} />
+              </Animated.View>
             </TouchableOpacity>
 
             <View style={styles.breadcrumbEnvBadge}>
@@ -1928,6 +2020,33 @@ const styles = StyleSheet.create({
   syncStatusText: {
     fontSize: 10,
     fontWeight: '700',
+  },
+  manualSyncIconBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  cloudRestoringBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(59, 130, 246, 0.25)',
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    marginBottom: 12,
+  },
+  cloudRestoringText: {
+    color: '#60a5fa',
+    fontSize: 12,
+    fontWeight: '600',
   },
   pendingSyncTag: {
     flexDirection: 'row',

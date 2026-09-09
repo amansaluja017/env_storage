@@ -1,13 +1,23 @@
 import * as SQLite from 'expo-sqlite';
 import { drizzle, ExpoSQLiteDatabase } from 'drizzle-orm/expo-sqlite';
 import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
-import { eq, and, or, like, desc, asc, sql, isNull, notInArray, inArray } from 'drizzle-orm';
+import { eq, and, or, like, desc, asc, sql, isNull, notInArray, inArray, lt } from 'drizzle-orm';
 import JSZip from 'jszip';
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import * as FileSystemLegacy from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
-import { apiClient } from '../utils/apiClient';
+import { apiClient, protoRequest } from '../utils/apiClient';
+import {
+  ListFoldersRequestProtoType,
+  ListFoldersResponseProtoType,
+  ListEnvsRequestProtoType,
+  ListEnvsResponseProtoType,
+  IListFoldersRequestProto,
+  IListFoldersResponseProto,
+  IListEnvsRequestProto,
+  IListEnvsResponseProto,
+} from '@tubo/proto';
 import {
   encryptEnvValue,
   decryptEnvValue,
@@ -382,7 +392,12 @@ export async function getPendingSyncQueue(limit?: number): Promise<SyncQueueItem
   let query = drizzle
     .select()
     .from(syncQueue)
-    .where(or(eq(syncQueue.status, 'pending'), eq(syncQueue.status, 'failed')))
+    .where(
+      or(
+        eq(syncQueue.status, 'pending'),
+        and(eq(syncQueue.status, 'failed'), lt(syncQueue.retryCount, 5))
+      )
+    )
     .orderBy(asc(syncQueue.createdAt));
 
   if (limit) {
@@ -434,7 +449,7 @@ export async function removeSyncItem(id: string): Promise<void> {
 }
 
 /**
- * Mark a local entity as fully synced in SQLite
+ * Mark a local folder or env as successfully synced
  */
 export async function markEntitySynced(
   entityType: 'folder' | 'env',
@@ -462,7 +477,12 @@ export async function getPendingSyncCount(): Promise<number> {
   const res = await drizzle
     .select({ count: sql<number>`count(*)` })
     .from(syncQueue)
-    .where(or(eq(syncQueue.status, 'pending'), eq(syncQueue.status, 'failed')));
+    .where(
+      or(
+        eq(syncQueue.status, 'pending'),
+        and(eq(syncQueue.status, 'failed'), lt(syncQueue.retryCount, 5))
+      )
+    );
 
   return Number(res[0]?.count || 0);
 }
@@ -1332,29 +1352,37 @@ export async function syncFoldersFromRemote(
 
   // 1. Reconcile deletions: remove local folders in this scope absent from remote (ONLY if already synced)
   const remoteFolderIds = remoteFolders.map((rf) => rf.id).filter(Boolean);
-  if (remoteFolderIds.length > 0) {
-    await drizzle
-      .delete(folders)
-      .where(
-        and(
-          eq(folders.workspaceId, workspaceId),
-          eq(folders.teamId, teamId),
-          eq(folders.environment, environment),
-          eq(folders.syncStatus, 'synced'),
-          notInArray(folders.id, remoteFolderIds)
-        )
-      );
-  } else {
-    await drizzle
-      .delete(folders)
-      .where(
-        and(
-          eq(folders.workspaceId, workspaceId),
-          eq(folders.teamId, teamId),
-          eq(folders.environment, environment),
-          eq(folders.syncStatus, 'synced')
-        )
-      );
+
+  // 1. Reconcile deletions: any local folder absent from remote and not pending creation in sync queue must be deleted
+  const pendingCreates = await drizzle
+    .select({ entityId: syncQueue.entityId })
+    .from(syncQueue)
+    .where(
+      and(
+        eq(syncQueue.entityType, 'folder'),
+        inArray(syncQueue.action, ['create', 'update']),
+        inArray(syncQueue.status, ['pending', 'syncing'])
+      )
+    );
+  const pendingCreateIds = new Set(pendingCreates.map((p) => p.entityId));
+
+  const localFolders = await drizzle
+    .select({ id: folders.id })
+    .from(folders)
+    .where(
+      and(
+        eq(folders.workspaceId, workspaceId),
+        eq(folders.teamId, teamId),
+        eq(folders.environment, environment)
+      )
+    );
+
+  const folderIdsToDelete = localFolders
+    .map((f) => f.id)
+    .filter((id) => !remoteFolderIds.includes(id) && !pendingCreateIds.has(id));
+
+  if (folderIdsToDelete.length > 0) {
+    await drizzle.delete(folders).where(inArray(folders.id, folderIdsToDelete));
   }
 
   // 2. Fetch any items pending deletion in local queue to avoid ghost revive
@@ -1430,13 +1458,25 @@ export async function syncEnvsFromRemote(
 ): Promise<void> {
   const { drizzle } = await ensureDb();
 
-  // 1. Reconcile deletions: remove local envs in this scope absent from remote (ONLY if already synced)
   const remoteEnvIds = remoteEnvs.map((re) => re.id).filter(Boolean);
+
+  // 1. Reconcile deletions: any local env absent from remote and not pending creation in sync queue must be deleted
+  const pendingCreates = await drizzle
+    .select({ entityId: syncQueue.entityId })
+    .from(syncQueue)
+    .where(
+      and(
+        eq(syncQueue.entityType, 'env'),
+        inArray(syncQueue.action, ['create', 'update', 'bulk_import']),
+        inArray(syncQueue.status, ['pending', 'syncing'])
+      )
+    );
+  const pendingCreateIds = new Set(pendingCreates.map((p) => p.entityId));
+
   const scopeConditions = [
     eq(envs.workspaceId, workspaceId),
     eq(envs.teamId, teamId),
     eq(envs.environment, environment),
-    eq(envs.syncStatus, 'synced'),
   ];
 
   if (folderScope !== undefined) {
@@ -1447,14 +1487,17 @@ export async function syncEnvsFromRemote(
     }
   }
 
-  if (remoteEnvIds.length > 0) {
-    await drizzle
-      .delete(envs)
-      .where(and(...scopeConditions, notInArray(envs.id, remoteEnvIds)));
-  } else {
-    await drizzle
-      .delete(envs)
-      .where(and(...scopeConditions));
+  const localEnvs = await drizzle
+    .select({ id: envs.id })
+    .from(envs)
+    .where(and(...scopeConditions));
+
+  const envIdsToDelete = localEnvs
+    .map((e) => e.id)
+    .filter((id) => !remoteEnvIds.includes(id) && !pendingCreateIds.has(id));
+
+  if (envIdsToDelete.length > 0) {
+    await drizzle.delete(envs).where(inArray(envs.id, envIdsToDelete));
   }
 
   // 2. Fetch any envs pending deletion in local queue to avoid ghost revive
@@ -1526,4 +1569,124 @@ export async function syncEnvsFromRemote(
       });
   }
 }
+
+/**
+ * Hydrate & reconcile all folders and environment variables from PostgreSQL into local SQLite.
+ * This ensures PostgreSQL is the authoritative source of truth, populating SQLite with all remote data
+ * on initial load, after an app reinstall, or upon manual sync.
+ * By default syncs across all 3 environments (development, staging, production) for full offline parity.
+ */
+export async function hydrateVaultFromRemote(
+  workspaceId: string,
+  teamId: string,
+  currentEnvironment: 'development' | 'staging' | 'production',
+  apiBaseUrl: string,
+  syncAllEnvironments: boolean = true
+): Promise<{ foldersCount: number; envsCount: number }> {
+  if (!workspaceId || !teamId || !apiBaseUrl) {
+    return { foldersCount: 0, envsCount: 0 };
+  }
+
+  const cleanBaseUrl = apiBaseUrl.replace(/\/+$/, '');
+  const envsToSync: Array<'development' | 'staging' | 'production'> = syncAllEnvironments
+    ? ['development', 'staging', 'production']
+    : [currentEnvironment];
+
+  let totalFolders = 0;
+  let totalEnvs = 0;
+
+  await Promise.all(
+    envsToSync.map(async (env) => {
+      try {
+        const [foldersRes, envsRes] = await Promise.all([
+          protoRequest<IListFoldersRequestProto, IListFoldersResponseProto>(
+            `${cleanBaseUrl}/api/proto/folder.list`,
+            { workspaceId, teamId, environment: env },
+            ListFoldersRequestProtoType,
+            ListFoldersResponseProtoType
+          ).catch(async (protoErr) => {
+            console.log('[mobileSqlite] Proto folder.list fallback to JSON:', protoErr?.message);
+            const res = await apiClient.get(`${cleanBaseUrl}/trpc/folder.list`, {
+              params: {
+                input: JSON.stringify({
+                  workspaceId,
+                  teamId,
+                  environment: env,
+                }),
+              },
+            });
+            return { success: true, items: res.data?.result?.data || [] };
+          }),
+          protoRequest<IListEnvsRequestProto, IListEnvsResponseProto>(
+            `${cleanBaseUrl}/api/proto/env.list`,
+            { workspaceId, teamId, environment: env, hasFolderFilter: false },
+            ListEnvsRequestProtoType,
+            ListEnvsResponseProtoType
+          ).catch(async (protoErr) => {
+            console.log('[mobileSqlite] Proto env.list fallback to JSON:', protoErr?.message);
+            const res = await apiClient.get(`${cleanBaseUrl}/trpc/env.list`, {
+              params: {
+                input: JSON.stringify({
+                  workspaceId,
+                  teamId,
+                  environment: env,
+                }),
+              },
+            });
+            return { success: true, items: res.data?.result?.data || [] };
+          }),
+        ]);
+
+        const remoteFolders = foldersRes.items;
+        if (Array.isArray(remoteFolders)) {
+          await syncFoldersFromRemote(workspaceId, teamId, env, remoteFolders);
+          totalFolders += remoteFolders.length;
+        }
+
+        const remoteEnvs = envsRes.items;
+        if (Array.isArray(remoteEnvs)) {
+          await syncEnvsFromRemote(workspaceId, teamId, env, remoteEnvs);
+          totalEnvs += remoteEnvs.length;
+        }
+      } catch (err: any) {
+        console.warn(`[mobileSqlite] Background hydration for ${env} skipped:`, err?.message || err);
+      }
+    })
+  );
+
+  return { foldersCount: totalFolders, envsCount: totalEnvs };
+}
+
+/**
+ * Query variable count per environment for a team in SQLite
+ */
+export async function getMobileEnvironmentsSummary(
+  workspaceId: string,
+  teamId: string
+): Promise<Record<'development' | 'staging' | 'production', number>> {
+  const { drizzle } = await ensureDb();
+  const res = await drizzle
+    .select({
+      environment: envs.environment,
+      count: sql<number>`count(*)`,
+    })
+    .from(envs)
+    .where(and(eq(envs.workspaceId, workspaceId), eq(envs.teamId, teamId)))
+    .groupBy(envs.environment);
+
+  const summary: Record<'development' | 'staging' | 'production', number> = {
+    development: 0,
+    staging: 0,
+    production: 0,
+  };
+
+  for (const row of res) {
+    if (row.environment && row.environment in summary) {
+      summary[row.environment as 'development' | 'staging' | 'production'] = Number(row.count) || 0;
+    }
+  }
+
+  return summary;
+}
+
 
