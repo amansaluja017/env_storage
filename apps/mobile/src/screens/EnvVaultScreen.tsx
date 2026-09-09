@@ -11,6 +11,8 @@ import {
   Platform,
   Animated,
   RefreshControl,
+  KeyboardAvoidingView,
+  useWindowDimensions,
 } from 'react-native';
 import { useForm, Controller } from 'react-hook-form';
 import { Ionicons } from '@expo/vector-icons';
@@ -95,6 +97,10 @@ export function EnvVaultScreen({
   user,
   refreshTrigger,
 }: EnvVaultScreenProps) {
+  const { width } = useWindowDimensions();
+  const isCompact = width < 380;
+  const isVeryCompact = width < 340;
+
   const envTabsTargetRef = useTourTarget('tour-env-tabs');
   const searchBarTargetRef = useTourTarget('tour-search-bar');
   const newFolderBtnTargetRef = useTourTarget('tour-new-folder-btn');
@@ -734,7 +740,7 @@ export function EnvVaultScreen({
       const targetFolderId = data.folderId || defaultFolder;
 
       // 1. Import to SQLite first (instant local response)
-      await bulkImportMobileEnvs(
+      const { importedCount } = await bulkImportMobileEnvs(
         workspaceId,
         teamId,
         environment,
@@ -742,6 +748,15 @@ export function EnvVaultScreen({
         creatorName,
         targetFolderId
       );
+
+      if (importedCount === 0) {
+        showCustomAlert({
+          title: 'No Variables Found',
+          message: 'No valid key-value pairs were detected. Comments and empty lines were ignored, but no valid entries were found.',
+          type: 'warning',
+        });
+        return;
+      }
 
       setRawModalVisible(false);
       resetRawForm({ rawDotEnv: '', folderId: '' });
@@ -765,6 +780,12 @@ export function EnvVaultScreen({
         },
       });
       mobileSyncManager.triggerSync(apiBaseUrl);
+
+      showCustomAlert({
+        title: 'Import Successful',
+        message: `Successfully imported ${importedCount} environment variable${importedCount === 1 ? '' : 's'}.`,
+        type: 'success',
+      });
     } catch (e: any) {
       showCustomAlert({
         title: 'Import Failed',
@@ -916,6 +937,10 @@ export function EnvVaultScreen({
           {(['development', 'staging', 'production'] as const).map(envName => {
             const isActive = environment === envName;
             const count = envCounts[envName] || 0;
+            const label = isCompact
+              ? (envName === 'development' ? 'DEV' : envName === 'staging' ? 'STAGE' : 'PROD')
+              : envName.toUpperCase();
+
             return (
               <TouchableOpacity
                 key={envName}
@@ -925,8 +950,15 @@ export function EnvVaultScreen({
                   setSelectedFolderId(null);
                 }}
               >
-                <Text style={[styles.envTabText, isActive && styles.envTabTextActive]}>
-                  {envName.toUpperCase()}
+                <Text
+                  style={[
+                    styles.envTabText,
+                    isActive && styles.envTabTextActive,
+                    isVeryCompact && { fontSize: 10.5 },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {label}
                   {count > 0 ? ` (${count})` : ''}
                 </Text>
               </TouchableOpacity>
@@ -1219,76 +1251,79 @@ export function EnvVaultScreen({
         <View style={{ flex: 1 }}>
           {/* Breadcrumb Navigation Trail */}
           <View style={styles.breadcrumbBar}>
-            <TouchableOpacity
-              style={styles.breadcrumbItem}
-              onPress={() => setSelectedFolderId(null)}
-              activeOpacity={0.7}
-              accessibilityLabel="Back to folders"
-            >
-              <Ionicons name="chevron-back" size={14} color={COLORS.primary} style={{ marginRight: 2 }} />
-              <Ionicons name="folder-outline" size={14} color={COLORS.primary} style={{ marginRight: 4 }} />
-              <Text style={styles.breadcrumbLinkText}>Folders</Text>
-            </TouchableOpacity>
+            <View style={styles.breadcrumbLeft}>
+              <TouchableOpacity
+                style={styles.breadcrumbItem}
+                onPress={() => setSelectedFolderId(null)}
+                activeOpacity={0.7}
+                accessibilityLabel="Back to folders"
+              >
+                <Ionicons name="chevron-back" size={14} color={COLORS.primary} style={{ marginRight: 2 }} />
+                <Ionicons name="folder-outline" size={14} color={COLORS.primary} style={{ marginRight: 4 }} />
+                <Text style={styles.breadcrumbLinkText}>Folders</Text>
+              </TouchableOpacity>
 
-            <Ionicons name="chevron-forward" size={12} color={COLORS.textMuted} style={styles.breadcrumbSeparator} />
+              <Ionicons name="chevron-forward" size={12} color={COLORS.textMuted} style={styles.breadcrumbSeparator} />
 
-            <View style={styles.breadcrumbCurrentItem}>
-              <Text style={styles.breadcrumbCurrentIcon}>
-                {selectedFolderId === 'root' ? '📄' : selectedFolderId === 'all' ? '🗄️' : '📁'}
-              </Text>
-              <Text style={styles.breadcrumbCurrentText} numberOfLines={1}>
-                {selectedFolderId === 'root'
-                  ? 'Root / Unfiled'
-                  : selectedFolderId === 'all'
-                  ? 'All Variables'
-                  : activeFolderObj?.name || 'Folder'}
-              </Text>
+              <View style={styles.breadcrumbCurrentItem}>
+                <Text style={styles.breadcrumbCurrentIcon}>
+                  {selectedFolderId === 'root' ? '📄' : selectedFolderId === 'all' ? '🗄️' : '📁'}
+                </Text>
+                <Text style={styles.breadcrumbCurrentText} numberOfLines={1} ellipsizeMode="tail">
+                  {selectedFolderId === 'root'
+                    ? 'Root / Unfiled'
+                    : selectedFolderId === 'all'
+                    ? 'All Variables'
+                    : activeFolderObj?.name || 'Folder'}
+                </Text>
+              </View>
             </View>
 
-            <View style={{ flex: 1 }} />
+            <View style={styles.breadcrumbRight}>
+              <TouchableOpacity
+                style={[
+                  styles.syncStatusBadge,
+                  (syncStatus.isSyncing || isRefreshing) && styles.syncStatusBadgeSyncing,
+                  syncStatus.pendingCount > 0 && !syncStatus.isSyncing && !isRefreshing && styles.syncStatusBadgePending,
+                ]}
+                onPress={handleManualRefresh}
+                activeOpacity={0.7}
+              >
+                {syncStatus.isSyncing || isRefreshing ? (
+                  <>
+                    <ActivityIndicator size="small" color="#3b82f6" style={{ marginRight: 4 }} />
+                    <Text style={[styles.syncStatusText, { color: '#3b82f6' }]}>Syncing...</Text>
+                  </>
+                ) : syncStatus.pendingCount > 0 ? (
+                  <>
+                    <Ionicons name="cloud-upload-outline" size={12} color="#f59e0b" style={{ marginRight: 4 }} />
+                    <Text style={[styles.syncStatusText, { color: '#f59e0b' }]}>{syncStatus.pendingCount}</Text>
+                  </>
+                ) : (
+                  <>
+                    <Ionicons name="cloud-done" size={12} color="#22c55e" style={{ marginRight: 4 }} />
+                    <Text style={[styles.syncStatusText, { color: '#22c55e' }]}>Synced</Text>
+                  </>
+                )}
+              </TouchableOpacity>
 
-            <TouchableOpacity
-              style={[
-                styles.syncStatusBadge,
-                (syncStatus.isSyncing || isRefreshing) && styles.syncStatusBadgeSyncing,
-                syncStatus.pendingCount > 0 && !syncStatus.isSyncing && !isRefreshing && styles.syncStatusBadgePending,
-                { marginRight: 6 },
-              ]}
-              onPress={handleManualRefresh}
-              activeOpacity={0.7}
-            >
-              {syncStatus.isSyncing || isRefreshing ? (
-                <>
-                  <ActivityIndicator size="small" color="#3b82f6" style={{ marginRight: 4 }} />
-                  <Text style={[styles.syncStatusText, { color: '#3b82f6' }]}>Syncing...</Text>
-                </>
-              ) : syncStatus.pendingCount > 0 ? (
-                <>
-                  <Ionicons name="cloud-upload-outline" size={12} color="#f59e0b" style={{ marginRight: 4 }} />
-                  <Text style={[styles.syncStatusText, { color: '#f59e0b' }]}>{syncStatus.pendingCount}</Text>
-                </>
-              ) : (
-                <>
-                  <Ionicons name="cloud-done" size={12} color="#22c55e" style={{ marginRight: 4 }} />
-                  <Text style={[styles.syncStatusText, { color: '#22c55e' }]}>Synced</Text>
-                </>
+              <TouchableOpacity
+                style={styles.manualSyncIconBtn}
+                onPress={handleManualRefresh}
+                activeOpacity={0.7}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityLabel="Sync vault with cloud"
+              >
+                <Animated.View style={{ transform: [{ rotate: spin }] }}>
+                  <Ionicons name="sync-outline" size={14} color={isRefreshing ? COLORS.primary : COLORS.textMuted} />
+                </Animated.View>
+              </TouchableOpacity>
+
+              {!isCompact && width >= 540 && (
+                <View style={styles.breadcrumbEnvBadge}>
+                  <Text style={styles.breadcrumbEnvText}>{environment.toUpperCase()}</Text>
+                </View>
               )}
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.manualSyncIconBtn, { marginRight: 8 }]}
-              onPress={handleManualRefresh}
-              activeOpacity={0.7}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              accessibilityLabel="Sync vault with cloud"
-            >
-              <Animated.View style={{ transform: [{ rotate: spin }] }}>
-                <Ionicons name="sync-outline" size={14} color={isRefreshing ? COLORS.primary : COLORS.textMuted} />
-              </Animated.View>
-            </TouchableOpacity>
-
-            <View style={styles.breadcrumbEnvBadge}>
-              <Text style={styles.breadcrumbEnvText}>{environment.toUpperCase()}</Text>
             </View>
           </View>
 
@@ -1976,6 +2011,9 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.bg,
     padding: 16,
+    width: '100%',
+    maxWidth: 1080,
+    alignSelf: 'center',
   },
   syncBar: {
     flexDirection: 'row',
@@ -2309,6 +2347,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     marginTop: 10,
     marginBottom: 4,
+    width: '100%',
+    maxWidth: 600,
+    alignSelf: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.4,
@@ -2357,13 +2398,22 @@ const styles = StyleSheet.create({
   breadcrumbBar: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     backgroundColor: COLORS.card,
     borderRadius: 10,
     borderWidth: 1,
     borderColor: COLORS.border,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
     marginBottom: 10,
+    minHeight: 44,
+  },
+  breadcrumbLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    minWidth: 0,
+    marginRight: 8,
   },
   breadcrumbItem: {
     flexDirection: 'row',
@@ -2371,6 +2421,7 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     paddingHorizontal: 4,
     borderRadius: 6,
+    flexShrink: 0,
   },
   breadcrumbLinkText: {
     color: COLORS.primary,
@@ -2378,22 +2429,32 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   breadcrumbSeparator: {
-    marginHorizontal: 4,
+    marginHorizontal: 3,
+    flexShrink: 0,
   },
   breadcrumbCurrentItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    flexShrink: 1,
-    maxWidth: 160,
+    flex: 1,
+    minWidth: 0,
   },
   breadcrumbCurrentIcon: {
     fontSize: 13,
-    marginRight: 5,
+    marginRight: 4,
+    flexShrink: 0,
   },
   breadcrumbCurrentText: {
     color: COLORS.text,
     fontSize: 13,
     fontWeight: '600',
+    flex: 1,
+    minWidth: 0,
+  },
+  breadcrumbRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexShrink: 0,
   },
   breadcrumbEnvBadge: {
     backgroundColor: COLORS.surface,
@@ -2704,7 +2765,8 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.85)',
     justifyContent: 'center',
-    padding: 20,
+    alignItems: 'center',
+    padding: 16,
   },
   modalCard: {
     backgroundColor: COLORS.card,
@@ -2713,6 +2775,9 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     padding: 20,
     maxHeight: '90%',
+    width: '100%',
+    maxWidth: 500,
+    alignSelf: 'center',
   },
   modalHeaderRow: {
     flexDirection: 'row',
@@ -2832,6 +2897,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.72)',
     justifyContent: 'flex-end',
+    alignItems: 'center',
   },
   menuSheetCard: {
     backgroundColor: '#0f172a',
@@ -2842,6 +2908,9 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingHorizontal: 18,
     paddingBottom: Platform.OS === 'ios' ? 36 : 24,
+    width: '100%',
+    maxWidth: 540,
+    alignSelf: 'center',
   },
   sheetHandleBar: {
     width: 38,

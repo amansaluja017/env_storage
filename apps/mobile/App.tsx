@@ -579,5 +579,8 @@ const styles = StyleSheet.create({
   },
   body: {
     flex: 1,
+    width: '100%',
+    maxWidth: 1080,
+    alignSelf: 'center',
   },
 });

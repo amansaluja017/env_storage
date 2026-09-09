@@ -398,8 +398,14 @@ class MobileSyncManager {
           });
 
           const imported = res.data?.result?.data;
-          if (Array.isArray(imported)) {
-            const importedKeys = imported.map((i: any) => i.key).filter(Boolean);
+          const items = Array.isArray(imported)
+            ? imported
+            : Array.isArray(imported?.items)
+            ? imported.items
+            : null;
+
+          if (items && items.length > 0) {
+            const importedKeys = items.map((i: any) => i.key).filter(Boolean);
             await reconcileBulkImportedEnvs(
               payload.workspaceId,
               payload.teamId,
@@ -411,7 +417,7 @@ class MobileSyncManager {
               payload.workspaceId,
               payload.teamId,
               payload.environment,
-              imported,
+              items,
               payload.folderId
             );
           }

@@ -8,6 +8,8 @@ import {
   Modal,
   ActivityIndicator,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { useForm, Controller } from 'react-hook-form';
 import { Ionicons } from '@expo/vector-icons';
@@ -101,7 +103,10 @@ export function CreateTeamModal({
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={handleClose}>
-      <View style={styles.modalOverlay}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.modalOverlay}
+      >
         <View style={styles.modalCard}>
           <View style={styles.headerRow}>
             <View style={styles.headerLeft}>
@@ -178,7 +183,7 @@ export function CreateTeamModal({
             </TouchableOpacity>
           </View>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -188,7 +193,8 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.7)',
     justifyContent: 'center',
-    padding: 24,
+    alignItems: 'center',
+    padding: 20,
   },
   modalCard: {
     backgroundColor: COLORS.card,
@@ -196,6 +202,10 @@ const styles = StyleSheet.create({
     padding: 24,
     borderWidth: 1,
     borderColor: COLORS.border,
+    width: '100%',
+    maxWidth: 460,
+    maxHeight: '90%',
+    alignSelf: 'center',
   },
   headerRow: {
     flexDirection: 'row',

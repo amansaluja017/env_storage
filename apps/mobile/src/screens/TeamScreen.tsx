@@ -10,6 +10,9 @@ import {
   Modal,
   Alert,
   Animated,
+  KeyboardAvoidingView,
+  Platform,
+  useWindowDimensions,
 } from 'react-native';
 import { useForm, Controller } from 'react-hook-form';
 import { Ionicons } from '@expo/vector-icons';
@@ -877,7 +880,10 @@ export function TeamScreen({
 
       {/* Invite Modal */}
       <Modal visible={inviteModalVisible} animationType="slide" transparent onRequestClose={() => setInviteModalVisible(false)}>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
           <View style={styles.modalCard}>
             <View style={styles.modalHeaderRow}>
               <View style={styles.modalHeaderLeft}>
@@ -1097,7 +1103,7 @@ export function TeamScreen({
               </View>
             </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* Change Role Modal */}
@@ -1329,10 +1335,16 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.bg,
     padding: 16,
+    width: '100%',
+    maxWidth: 1080,
+    alignSelf: 'center',
   },
   actionBanner: {
     flexDirection: 'row',
     marginBottom: 16,
+    width: '100%',
+    maxWidth: 600,
+    alignSelf: 'center',
   },
   inviteBtn: {
     flex: 1,
@@ -1857,7 +1869,8 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.8)',
     justifyContent: 'center',
-    padding: 20,
+    alignItems: 'center',
+    padding: 16,
   },
   modalCard: {
     backgroundColor: COLORS.card,
@@ -1865,6 +1878,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     padding: 20,
+    width: '100%',
+    maxWidth: 480,
+    maxHeight: '90%',
+    alignSelf: 'center',
   },
   modalHeaderRow: {
     flexDirection: 'row',

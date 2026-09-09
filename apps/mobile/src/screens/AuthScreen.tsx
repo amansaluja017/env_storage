@@ -11,6 +11,8 @@ import {
   Modal,
   Linking,
   Image,
+  ScrollView,
+  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useForm, Controller } from 'react-hook-form';
@@ -35,6 +37,9 @@ interface AuthScreenProps {
 }
 
 export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
+  const { width, height } = useWindowDimensions();
+  const isCompactHeight = height < 700;
+
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -186,24 +191,36 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.content}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={{ flex: 1 }}
       >
-        {/* Brand Header */}
-        <View style={styles.brandContainer}>
-          <Image
-            source={require('../../assets/icon.png')}
-            style={styles.logoImage}
-            resizeMode="contain"
-          />
-          <Text style={styles.title}>ENV VAULT</Text>
-          <Text style={styles.subtitle}>
-            Secure Environment Variable Vault & Team Workspace
-          </Text>
-        </View>
+        <ScrollView
+          contentContainerStyle={[
+            styles.scrollContent,
+            isCompactHeight && { paddingVertical: 16 },
+          ]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View style={[styles.mainWrapper, { maxWidth: Math.min(width - 32, 460) }]}>
+            {/* Brand Header */}
+            <View style={[styles.brandContainer, isCompactHeight && { marginBottom: 18 }]}>
+              <Image
+                source={require('../../assets/icon.png')}
+                style={[
+                  styles.logoImage,
+                  isCompactHeight && { width: 52, height: 52, marginBottom: 8 },
+                ]}
+                resizeMode="contain"
+              />
+              <Text style={[styles.title, isCompactHeight && { fontSize: 26 }]}>ENV VAULT</Text>
+              <Text style={styles.subtitle}>
+                Secure Environment Variable Vault & Team Workspace
+              </Text>
+            </View>
 
-        {/* Auth Card */}
-        <View style={styles.card}>
+            {/* Auth Card */}
+            <View style={styles.card}>
           <Text style={styles.cardHeaderTitle}>
             {isLogin ? 'Sign In to Workspace' : 'Create New Account'}
           </Text>
@@ -361,67 +378,69 @@ export function AuthScreen({ onLoginSuccess, apiBaseUrl }: AuthScreenProps) {
 
           <Text style={styles.urlIndicator}>Target: {apiBaseUrl}</Text>
         </View>
+      </View>
+    </ScrollView>
+  </KeyboardAvoidingView>
 
-        {/* Forgot Password Modal */}
-        <Modal
-          visible={forgotPasswordModalOpen}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setForgotPasswordModalOpen(false)}
-        >
-          <KeyboardAvoidingView
-            style={styles.modalOverlay}
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+  {/* Forgot Password Modal */}
+  <Modal
+    visible={forgotPasswordModalOpen}
+    transparent
+    animationType="fade"
+    onRequestClose={() => setForgotPasswordModalOpen(false)}
+  >
+    <KeyboardAvoidingView
+      style={styles.modalOverlay}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <View style={styles.modalCard}>
+        <View style={styles.modalHeader}>
+          <View style={styles.modalTitleRow}>
+            <Ionicons name="key-outline" size={18} color={COLORS.secondary} style={{ marginRight: 8 }} />
+            <Text style={styles.modalTitle}>Reset Password</Text>
+          </View>
+          <TouchableOpacity
+            style={styles.modalCloseBtn}
+            onPress={() => setForgotPasswordModalOpen(false)}
           >
-            <View style={styles.modalCard}>
-              <View style={styles.modalHeader}>
-                <View style={styles.modalTitleRow}>
-                  <Ionicons name="key-outline" size={18} color={COLORS.secondary} style={{ marginRight: 8 }} />
-                  <Text style={styles.modalTitle}>Reset Password</Text>
-                </View>
-                <TouchableOpacity
-                  style={styles.modalCloseBtn}
-                  onPress={() => setForgotPasswordModalOpen(false)}
-                >
-                  <Ionicons name="close" size={18} color={COLORS.textSubtle} />
-                </TouchableOpacity>
-              </View>
+            <Ionicons name="close" size={18} color={COLORS.textSubtle} />
+          </TouchableOpacity>
+        </View>
 
-              <Text style={styles.modalSubtitle}>
-                Enter your account email. We'll generate a secure reset token and send instructions to your inbox.
-              </Text>
+        <Text style={styles.modalSubtitle}>
+          Enter your account email. We'll generate a secure reset token and send instructions to your inbox.
+        </Text>
 
-              <View style={{ marginBottom: 18 }}>
-                <Text style={styles.label}>Account Email</Text>
-                <TextInput
-                  style={styles.input}
-                  placeholder="name@company.com"
-                  placeholderTextColor={COLORS.textMuted}
-                  keyboardType="email-address"
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  value={forgotEmail}
-                  onChangeText={setForgotEmail}
-                />
-              </View>
+        <View style={{ marginBottom: 18 }}>
+          <Text style={styles.label}>Account Email</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="name@company.com"
+            placeholderTextColor={COLORS.textMuted}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            autoCorrect={false}
+            value={forgotEmail}
+            onChangeText={setForgotEmail}
+          />
+        </View>
 
-              <TouchableOpacity
-                style={[styles.primaryButton, forgotSubmitting && { opacity: 0.7 }]}
-                onPress={handleForgotPasswordSubmit}
-                disabled={forgotSubmitting}
-                activeOpacity={0.8}
-              >
-                {forgotSubmitting ? (
-                  <ActivityIndicator color="#000" size="small" />
-                ) : (
-                  <Text style={styles.primaryButtonText}>Send Reset Link</Text>
-                )}
-              </TouchableOpacity>
-            </View>
-          </KeyboardAvoidingView>
-        </Modal>
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+        <TouchableOpacity
+          style={[styles.primaryButton, forgotSubmitting && { opacity: 0.7 }]}
+          onPress={handleForgotPasswordSubmit}
+          disabled={forgotSubmitting}
+          activeOpacity={0.8}
+        >
+          {forgotSubmitting ? (
+            <ActivityIndicator color="#000" size="small" />
+          ) : (
+            <Text style={styles.primaryButtonText}>Send Reset Link</Text>
+          )}
+        </TouchableOpacity>
+      </View>
+    </KeyboardAvoidingView>
+  </Modal>
+</SafeAreaView>
   );
 }
 
@@ -430,10 +449,16 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.bg,
   },
-  content: {
-    flex: 1,
+  scrollContent: {
+    flexGrow: 1,
     justifyContent: 'center',
-    paddingHorizontal: 24,
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 24,
+  },
+  mainWrapper: {
+    width: '100%',
+    alignSelf: 'center',
   },
   brandContainer: {
     alignItems: 'center',
@@ -481,6 +506,7 @@ const styles = StyleSheet.create({
     padding: 24,
     borderWidth: 1,
     borderColor: COLORS.border,
+    width: '100%',
   },
   cardHeaderTitle: {
     fontSize: 18,
@@ -570,7 +596,8 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.8)',
     justifyContent: 'center',
-    padding: 24,
+    alignItems: 'center',
+    padding: 20,
   },
   modalCard: {
     backgroundColor: '#121316',
@@ -578,6 +605,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
     padding: 24,
+    width: '100%',
+    maxWidth: 440,
+    alignSelf: 'center',
   },
   modalHeader: {
     flexDirection: 'row',

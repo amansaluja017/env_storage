@@ -287,3 +287,7 @@ export function decodeProto<T>(type: protobuf.Type, buffer: Uint8Array | ArrayBu
     bytes: Uint8Array,
   }) as T;
 }
+
+// DotEnv Parser Exports
+export * from './dotenvParser.js';
+
