@@ -37,10 +37,9 @@
       "expo-sqlite",
       "expo-font"
     ],
-    "owner": "dreamvisaimmigration001",
     "extra": {
       "eas": {
-        "projectId": "8d336a70-50c1-4426-9bbe-d247d873a79b"
+        "projectId": "b17bf8b5-92df-46fe-b448-bf02fab53f99"
       }
     }
   }
